@@ -1,0 +1,23 @@
+# Node / tooling
+node_modules
+dist
+
+# Env
+.env
+
+# Data
+data/*
+!.gitkeep
+
+# Logs
+logs
+*.log
+
+# Coverage
+coverage
+
+# Editors
+.DS_Store
+.vscode
+.idea
+

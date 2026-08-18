@@ -1,0 +1,54 @@
+{
+  "name": "slab-email",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Headless email connector for AI agents via REST and MCP",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "lint": "eslint src/**/*.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "email",
+    "mcp",
+    "agents"
+  ],
+  "author": "slab",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/node": "2.0",
+    "@modelcontextprotocol/sdk": "1.30",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "better-sqlite3": "^11.10.0",
+    "express": "^5.2.1",
+    "google-auth-library": "^11.0.2",
+    "googleapis": "^175.0.0",
+    "html-to-text": "^9.0.5",
+    "imapflow": "1.7",
+    "mailparser": "^3.7.0",
+    "nodemailer": "^9.0.5",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^20.19.43",
+    "@types/supertest": "^7.2.1",
+    "@typescript-eslint/eslint-plugin": "^8.67.0",
+    "@typescript-eslint/parser": "^8.67.0",
+    "@vitest/coverage-v8": "^3.2.7",
+    "dotenv": "^17.4.2",
+    "eslint": "^9.39.5",
+    "prettier": "^3.9.6",
+    "supertest": "^7.2.2",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

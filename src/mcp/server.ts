@@ -1,0 +1,339 @@
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
+
+import { AuthenticatedRequest } from '../middleware/auth.js';
+import { MailService } from '../services/mail-service.js';
+import { ApiError, ERROR_CODES } from '../types/errors.js';
+
+export interface McpContext {
+  profileId: string;
+  accountIds: string[];
+}
+
+const READ_ONLY_TOOL: ToolAnnotations = {
+  readOnlyHint: true,
+  idempotentHint: true,
+  openWorldHint: false
+};
+
+const WRITE_TOOL: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: true
+};
+
+const sanitizeError = (error: unknown): string => {
+  if (error instanceof ApiError) {
+    return error.message;
+  }
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return 'unexpected error';
+};
+
+const asStructuredContent = (value: unknown): Record<string, unknown> => value as Record<string, unknown>;
+const textContent = (value: string): { type: 'text'; text: string }[] => [{ type: 'text', text: value }];
+
+const toolError = (error: unknown) => {
+  const normalized = error instanceof ApiError ? `${error.code}: ${error.message}` : sanitizeError(error);
+  const detail = error instanceof ApiError && error.details ? JSON.stringify(error.details) : undefined;
+  return {
+    content: textContent(detail ? `${normalized} ${detail}` : normalized),
+    structuredContent: asStructuredContent({ error: sanitizeError(error), code: error instanceof ApiError ? error.code : ERROR_CODES.INTERNAL_ERROR })
+  };
+};
+
+const parseAddressField = (value: unknown): { address: string }[] => {
+  if (!value) return [];
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => (typeof entry === 'string' ? entry : String(entry)))
+      .filter(Boolean)
+      .map((entry) => ({ address: String(entry).trim().toLowerCase() }));
+  }
+  if (typeof value === 'string') {
+    return value
+      .split(',')
+      .map((entry) => entry.trim().toLowerCase())
+      .filter(Boolean)
+      .map((address) => ({ address }));
+  }
+  return [];
+};
+
+const ensureArray = (value: unknown): string[] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  return value
+    .map((entry) => String(entry).trim().toLowerCase())
+    .filter(Boolean)
+    .filter((entry) => entry.length > 0);
+};
+
+const searchInputSchema = z.object({
+  accountId: z.string().trim().min(1),
+  query: z.string().trim().optional(),
+  from: z.string().trim().optional(),
+  to: z.string().trim().optional(),
+  subject: z.string().trim().optional(),
+  since: z.string().trim().optional(),
+  before: z.string().trim().optional(),
+  unread: z.coerce.boolean().optional(),
+  limit: z.preprocess(
+    (value) => {
+      if (value === undefined) return undefined;
+      const parsed = typeof value === 'string' ? Number.parseInt(value, 10) : Number(value);
+      return Number.isFinite(parsed) ? parsed : undefined;
+    },
+    z.number().int().min(1).max(100).optional()
+  ),
+  cursor: z.string().trim().optional()
+});
+
+const getMessageInputSchema = z.object({
+  accountId: z.string().trim().min(1),
+  messageId: z.string().trim().min(1)
+});
+
+const listThreadInputSchema = z.object({
+  accountId: z.string().trim().min(1),
+  threadId: z.string().trim().min(1)
+});
+
+const draftInputSchema = z.object({
+  accountId: z.string().trim().min(1),
+  to: z.array(z.string().trim().email()).min(1),
+  cc: z.array(z.string().trim().email()).optional(),
+  bcc: z.array(z.string().trim().email()).optional(),
+  subject: z.string().trim().min(1),
+  text: z.string().trim().min(1),
+  html: z.string().optional()
+});
+
+const sendInputSchema = draftInputSchema.extend({
+  idempotencyKey: z.string().trim().min(1)
+});
+
+const replyInputSchema = z.object({
+  accountId: z.string().trim().min(1),
+  messageId: z.string().trim().min(1),
+  to: z.array(z.string().trim().email()).optional(),
+  cc: z.array(z.string().trim().email()).optional(),
+  text: z.string().trim().min(1),
+  html: z.string().optional(),
+  replyAll: z.boolean().optional(),
+  idempotencyKey: z.string().trim().min(1)
+});
+
+export const createMcpTools = (
+  server: McpServer,
+  mailService: MailService,
+  req: AuthenticatedRequest,
+  _context: McpContext
+): void => {
+  server.registerTool(
+    'email_list_accounts',
+    {
+      description: 'List accounts visible for this access profile',
+      annotations: READ_ONLY_TOOL
+    },
+    async (_extra) => {
+      const accounts = mailService.listAccounts(req).map((account) => ({
+        id: account.id,
+        email: account.emailAddress,
+        provider: account.provider,
+        capabilities: {
+          read: account.capabilities.read,
+          draft: account.capabilities.draft,
+          send: account.capabilities.send,
+          reply: account.capabilities.reply,
+          search: account.capabilities.search,
+          threads: account.capabilities.threads
+        }
+      }));
+
+        return {
+          structuredContent: asStructuredContent({ items: accounts }),
+          content: textContent(`accounts: ${accounts.length}`)
+        };
+    }
+  );
+
+  server.registerTool(
+    'email_search',
+    {
+      description: 'Search messages on a connected account',
+      inputSchema: searchInputSchema,
+      annotations: READ_ONLY_TOOL
+    },
+    async (rawArgs, _extra) => {
+      const args = searchInputSchema.parse(rawArgs);
+      try {
+        const result = await mailService.search(req, {
+          accountId: args.accountId,
+          query: args.query,
+          from: args.from,
+          to: args.to,
+          subject: args.subject,
+          since: args.since,
+          before: args.before,
+          unread: args.unread,
+          limit: args.limit,
+          cursor: args.cursor
+        });
+        return {
+          structuredContent: asStructuredContent(result),
+          content: textContent(`search results: ${result.items.length}`)
+        };
+      } catch (error) {
+        return toolError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    'email_get_message',
+    {
+      description: 'Get message by account and message id',
+      inputSchema: getMessageInputSchema,
+      annotations: READ_ONLY_TOOL
+    },
+    async (rawArgs, _extra) => {
+      const args = getMessageInputSchema.parse(rawArgs);
+      try {
+        const message = await mailService.getMessage(req, args.accountId, args.messageId);
+        return {
+          structuredContent: asStructuredContent(message),
+          content: textContent(`${message.subject || '(no subject)'} ${message.id}`)
+        };
+      } catch (error) {
+        return toolError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    'email_list_threads',
+    {
+      description: 'Read all messages for a thread',
+      inputSchema: listThreadInputSchema,
+      annotations: READ_ONLY_TOOL
+    },
+    async (rawArgs, _extra) => {
+      const args = listThreadInputSchema.parse(rawArgs);
+      try {
+        const thread = await mailService.getThread(req, args.accountId, args.threadId);
+        return {
+          structuredContent: asStructuredContent({ items: thread }),
+          content: textContent(`thread size: ${thread.length}`)
+        };
+      } catch (error) {
+        return toolError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    'email_create_draft',
+    {
+      description: 'Create a remote draft message',
+      inputSchema: draftInputSchema,
+      annotations: WRITE_TOOL
+    },
+    async (rawArgs, _extra) => {
+      const args = draftInputSchema.parse(rawArgs);
+      try {
+        const result = await mailService.createDraft(req, {
+          accountId: args.accountId,
+          to: parseAddressField(args.to),
+          cc: ensureArray(args.cc)?.map((entry) => ({ address: entry })),
+          bcc: ensureArray(args.bcc)?.map((entry) => ({ address: entry })),
+          subject: args.subject,
+          text: args.text,
+          html: args.html
+        });
+        return {
+          structuredContent: asStructuredContent(result),
+          content: textContent(`draft: ${result.draftId}`)
+        };
+      } catch (error) {
+        return toolError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    'email_send',
+    {
+      description: 'Send email with required idempotencyKey',
+      inputSchema: sendInputSchema,
+      annotations: WRITE_TOOL
+    },
+    async (rawArgs, _extra) => {
+      const args = sendInputSchema.parse(rawArgs);
+      if (!args.idempotencyKey) {
+        return toolError(new ApiError(ERROR_CODES.INVALID_INPUT, 'idempotencyKey is required for email_send', 400));
+      }
+      try {
+        const result = await mailService.send(req, {
+          accountId: args.accountId,
+          to: parseAddressField(args.to),
+          cc: ensureArray(args.cc)?.map((entry) => ({ address: entry })),
+          bcc: ensureArray(args.bcc)?.map((entry) => ({ address: entry })),
+          subject: args.subject,
+          text: args.text,
+          html: args.html,
+          idempotencyKey: args.idempotencyKey
+        });
+        return {
+          structuredContent: asStructuredContent(result),
+          content: textContent(`send: ${result.status}`)
+        };
+      } catch (error) {
+        return toolError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    'email_reply',
+    {
+      description: 'Reply to a message with required idempotencyKey',
+      inputSchema: replyInputSchema,
+      annotations: WRITE_TOOL
+    },
+    async (rawArgs, _extra) => {
+      const args = replyInputSchema.parse(rawArgs);
+      if (!args.idempotencyKey) {
+        return toolError(new ApiError(ERROR_CODES.INVALID_INPUT, 'idempotencyKey is required for email_reply', 400));
+      }
+      try {
+        const result = await mailService.reply(req, {
+          accountId: args.accountId,
+          messageId: args.messageId,
+          to: ensureArray(args.to)?.map((entry) => ({ address: entry })),
+          cc: ensureArray(args.cc)?.map((entry) => ({ address: entry })),
+          text: args.text,
+          html: args.html,
+          replyAll: args.replyAll,
+          idempotencyKey: args.idempotencyKey
+        });
+        return {
+          structuredContent: asStructuredContent(result),
+          content: textContent(`reply: ${result.status}`)
+        };
+      } catch (error) {
+        return toolError(error);
+      }
+    }
+  );
+};
+
+export const createMcpServer = (name: string, version: string): McpServer => {
+  return new McpServer({
+    name,
+    version
+  });
+};

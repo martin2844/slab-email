@@ -1,0 +1,20 @@
+services:
+  slab-email:
+    build:
+      context: .
+    image: slab-email:latest
+    container_name: slab-email
+    environment:
+      HOST: 0.0.0.0
+      PORT: 6981
+      DATABASE_PATH: /data/slab-email.db
+      LOG_LEVEL: info
+      MAX_SENDS_PER_ACCOUNT_PER_HOUR: 60
+      MCP_ALLOWED_ORIGINS: 127.0.0.1:6981
+      MCP_ALLOWED_ORIGINS_HOSTS: 127.0.0.1,localhost,[::1],localhost
+      PUBLIC_ADMIN_ALLOWED_ORIGINS: 127.0.0.1:6981
+    volumes:
+      - ./data:/data
+    ports:
+      - "6981:6981"
+    command: ["node", "dist/index.js"]
