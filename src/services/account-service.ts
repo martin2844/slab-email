@@ -5,7 +5,8 @@ import {
   AccountRecord,
   EmailAccountConfig,
   ImapSmtpAccountConfig,
-  GmailAccountConfig
+  GmailAccountConfig,
+  OAuthMetaState
 } from '../types/models.js';
 import { RuntimeConfig } from '../config/env.js';
 import { DatabaseService } from '../db/database.js';
@@ -270,7 +271,7 @@ export class AccountService {
     const codeVerifier = generatePkceCodeVerifier();
     const codeChallenge = generatePkceCodeChallenge(codeVerifier);
 
-    const redirectUri = this.deps.config.googleRedirectUri;
+    const redirectUri = options.returnUrl ?? this.deps.config.googleRedirectUri;
     if (!this.deps.config.googleClientId || !this.deps.config.googleClientSecret) {
       throw new ApiError(ERROR_CODES.INVALID_CONFIGURATION, 'Missing Google OAuth credentials', 400);
     }
@@ -321,10 +322,11 @@ export class AccountService {
       throw new ApiError(ERROR_CODES.INVALID_INPUT, 'state provider mismatch', 400);
     }
 
+    const meta = state.meta as OAuthMetaState;
     const googleAuth = new google.auth.OAuth2(
       this.deps.config.googleClientId,
       this.deps.config.googleClientSecret,
-      this.deps.config.googleRedirectUri
+      meta.returnUrl ?? this.deps.config.googleRedirectUri
     );
 
     const result = await googleAuth.getToken({

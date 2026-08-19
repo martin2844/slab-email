@@ -19,7 +19,12 @@ import { clampText, firstTextOrBody, normalizeAddressList } from '../../utils/me
 import { Provider } from '../types.js';
 import type { GenericImapSmtpProviderConfig } from './types.js';
 
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+const LOOPBACK_HOSTS = new Set([
+  '127.0.0.1',
+  'localhost',
+  '[::1]',
+  'host.docker.internal'
+]);
 const SEARCH_DEFAULT_LIMIT = 20;
 const SEARCH_MAX_LIMIT = 100;
 const SNIPPET_MAX = 340;

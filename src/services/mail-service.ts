@@ -53,7 +53,7 @@ export class MailService {
   private canSend(req: AuthenticatedRequest): void {
     const profile = this.getProfile(req);
     if (!profile.sendEnabled) {
-      throw new ApiError(ERROR_CODES.SEND_DISABLED, 'send permission denied', 403);
+      throw new ApiError(ERROR_CODES.PERMISSION_DENIED, 'send permission denied', 403);
     }
   }
 

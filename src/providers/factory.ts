@@ -11,6 +11,15 @@ export interface SecretBundle {
   refreshToken?: string;
 }
 
+export const shouldTrustDockerDesktopBridge = (
+  provider: AccountRecord['provider'],
+  imapHost: string,
+  smtpHost: string
+): boolean =>
+  provider === 'proton_bridge' &&
+  imapHost === 'host.docker.internal' &&
+  smtpHost === 'host.docker.internal';
+
 const toGenericConfig = (account: AccountRecord, secret: SecretBundle): GenericImapSmtpProviderConfig => {
   const cfg = account.config as ImapSmtpAccountConfig;
   if (!cfg?.imapHost || !cfg?.smtpHost) {
@@ -19,6 +28,11 @@ const toGenericConfig = (account: AccountRecord, secret: SecretBundle): GenericI
 
   const username = secret.username || account.emailAddress;
   const password = secret.password;
+  const dockerDesktopBridge = shouldTrustDockerDesktopBridge(
+    account.provider,
+    cfg.imapHost,
+    cfg.smtpHost
+  );
   if (!password) {
     throw new Error('Missing IMAP/SMTP password');
   }
@@ -33,14 +47,14 @@ const toGenericConfig = (account: AccountRecord, secret: SecretBundle): GenericI
       username,
       password,
       imapCustomCa: cfg.customCA,
-      imapAllowInsecure: cfg.customTls
+      imapAllowInsecure: cfg.customTls || dockerDesktopBridge
     },
     smtp: {
       smtpHost: cfg.smtpHost,
       smtpPort: cfg.smtpPort,
       smtpTlsMode: cfg.smtpTlsMode,
       smtpCustomCa: cfg.customCA,
-      smtpAllowInsecure: cfg.customTls,
+      smtpAllowInsecure: cfg.customTls || dockerDesktopBridge,
       fromName: account.displayName,
       fromAddress: account.emailAddress,
       smtpMessageIdDomain: cfg.smtpMessageIdDomain,

@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 
+import { createFakeProvider } from './fakes.js';
 import { createTestContext } from './helpers.js';
 
 const parseMcpStreamResponse = (body: string): Record<string, unknown> => {
@@ -63,10 +64,12 @@ describe('MCP endpoint', () => {
       })
       .expect(201);
 
-    const token = (await request(ctx.app)
-      .post(`/api/access-profiles/${tokenRes.body.id}/tokens`)
-      .set('Authorization', `Bearer ${ctx.config.adminKey}`)
-      .expect(201)).body.token;
+    const token = (
+      await request(ctx.app)
+        .post(`/api/access-profiles/${tokenRes.body.id}/tokens`)
+        .set('Authorization', `Bearer ${ctx.config.adminKey}`)
+        .expect(201)
+    ).body.token;
 
     const listRes = await request(ctx.app)
       .post('/mcp')
@@ -82,6 +85,9 @@ describe('MCP endpoint', () => {
     const listBody = parseMcpStreamResponse(listRes.text);
     const tools = listBody?.result?.tools as Array<{ name: string }>;
     expect(Array.isArray(tools)).toBe(true);
+    expect(tools.map(({ name }) => name)).toContain('email_list_accounts');
+    expect(tools.map(({ name }) => name)).not.toContain('email_send');
+    expect(tools.map(({ name }) => name)).not.toContain('email_create_draft');
 
     const toolCall = await request(ctx.app)
       .post('/mcp')
@@ -102,11 +108,97 @@ describe('MCP endpoint', () => {
     const items = callBody?.result?.content?.[0]?.text;
     expect(typeof items).toBe('string');
     expect(callBody.result.structuredContent).toMatchObject({
-      items: [{
-        id: first.body.id,
-        email: 'alpha@clasific.ar'
-      }]
+      items: [
+        {
+          id: first.body.id,
+          email: 'alpha@clasific.ar'
+        }
+      ]
     });
     expect(String(items)).toContain('accounts: 1');
+  });
+
+  it('allows scoped email_search and rejects email_send without send permission', async () => {
+    const provider = createFakeProvider({
+      searchResult: [
+        {
+          id: 'message-1',
+          accountId: 'account-placeholder',
+          from: { address: 'buyer@example.com' },
+          to: [{ address: 'sales@example.com' }],
+          subject: 'Pricing question',
+          date: new Date().toISOString(),
+          snippet: 'Can you share pricing?',
+          threadId: 'thread-1'
+        }
+      ]
+    });
+    vi.spyOn(ctx.accountService, 'getProviderForAccount').mockResolvedValue(provider);
+    const account = await request(ctx.app)
+      .post('/api/accounts/proton-bridge')
+      .set('Authorization', `Bearer ${ctx.config.adminKey}`)
+      .send({
+        emailAddress: 'sales@clasific.ar',
+        displayName: 'Sales',
+        imapHost: '127.0.0.1',
+        imapPort: 1143,
+        imapTlsMode: 'starttls',
+        smtpHost: '127.0.0.1',
+        smtpPort: 1025,
+        smtpTlsMode: 'starttls',
+        username: 'bridge-user',
+        password: 'bridge-password'
+      })
+      .expect(201);
+    const profile = await request(ctx.app)
+      .post('/api/access-profiles')
+      .set('Authorization', `Bearer ${ctx.config.adminKey}`)
+      .send({
+        name: 'sales',
+        readEnabled: true,
+        draftEnabled: false,
+        sendEnabled: false,
+        accountIds: [account.body.id]
+      })
+      .expect(201);
+    const token = (
+      await request(ctx.app)
+        .post(`/api/access-profiles/${profile.body.id}/tokens`)
+        .set('Authorization', `Bearer ${ctx.config.adminKey}`)
+        .expect(201)
+    ).body.token;
+
+    const call = async (id: number, name: string, args: Record<string, unknown>) => {
+      const response = await request(ctx.app)
+        .post('/mcp')
+        .set('Authorization', `Bearer ${token}`)
+        .set('Accept', 'application/json, text/event-stream')
+        .send({
+          jsonrpc: '2.0',
+          id,
+          method: 'tools/call',
+          params: { name, arguments: args }
+        })
+        .expect(200);
+      return parseMcpStreamResponse(response.text);
+    };
+
+    const search = await call(10, 'email_search', {
+      accountId: account.body.id,
+      query: 'pricing',
+      limit: 5
+    });
+    expect(search.result.structuredContent.items).toHaveLength(1);
+
+    const send = await call(11, 'email_send', {
+      accountId: account.body.id,
+      to: ['buyer@example.com'],
+      subject: 'Pricing',
+      text: 'Hello',
+      idempotencyKey: 'test-send-denied'
+    });
+    expect(send.result.structuredContent).toMatchObject({
+      code: 'PERMISSION_DENIED'
+    });
   });
 });

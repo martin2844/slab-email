@@ -4,6 +4,16 @@ services:
       context: .
     image: slab-email:latest
     container_name: slab-email
+    env_file:
+      - .env
+    # Runtime secrets and optional OAuth config are loaded from .env:
+    # SLAB_EMAIL_ADMIN_KEY, SLAB_EMAIL_MASTER_KEY, GOOGLE_*
+    # Proton Bridge must be run separately (local-first). If your Bridge is on the host,
+    # point account fields imapHost/smtpHost to host.docker.internal or use host network.
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    # On Linux, alternatively uncomment below if you prefer host networking:
+    # network_mode: host
     environment:
       HOST: 0.0.0.0
       PORT: 6981

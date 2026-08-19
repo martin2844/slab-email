@@ -54,15 +54,21 @@ describe('access profile scoping', () => {
     const second = await request(ctx.app)
       .post('/api/accounts/proton-bridge')
       .set('Authorization', `Bearer ${ctx.config.adminKey}`)
-      .send({ ...basePayload, emailAddress: 'finance@clasific.ar', displayName: 'Finance', username: 'finance' })
+      .send({
+        ...basePayload,
+        emailAddress: 'finance@clasific.ar',
+        displayName: 'Finance',
+        username: 'finance'
+      })
       .expect(201);
 
-    const { token } = await createProfileAndToken(ctx, first.body.id, { readEnabled: true, sendEnabled: false, draftEnabled: false });
+    const { token } = await createProfileAndToken(ctx, first.body.id, {
+      readEnabled: true,
+      sendEnabled: false,
+      draftEnabled: false
+    });
 
-    const accountList = await request(ctx.app)
-      .get('/api/accounts')
-      .set('Authorization', `Bearer ${token}`)
-      .expect(200);
+    const accountList = await request(ctx.app).get('/api/accounts').set('Authorization', `Bearer ${token}`).expect(200);
 
     expect(accountList.body).toHaveLength(1);
     expect(accountList.body[0].id).toBe(first.body.id);
@@ -83,5 +89,35 @@ describe('access profile scoping', () => {
 
     expect(allowedSearch.body.items).toHaveLength(1);
     expect(allowedSearch.body.items[0].id).toBe('1');
+  });
+
+  it('lists account metadata for admins and supports PATCH updates without exposing credentials', async () => {
+    const created = await request(ctx.app)
+      .post('/api/accounts/proton-bridge')
+      .set('Authorization', `Bearer ${ctx.config.adminKey}`)
+      .send(basePayload)
+      .expect(201);
+
+    const listed = await request(ctx.app)
+      .get('/api/accounts')
+      .set('Authorization', `Bearer ${ctx.config.adminKey}`)
+      .expect(200);
+
+    expect(listed.body).toHaveLength(1);
+    expect(listed.body[0]).toMatchObject({
+      id: created.body.id,
+      emailAddress: basePayload.emailAddress,
+      displayName: basePayload.displayName
+    });
+    expect(JSON.stringify(listed.body)).not.toContain(basePayload.password);
+
+    const updated = await request(ctx.app)
+      .patch(`/api/accounts/${created.body.id}`)
+      .set('Authorization', `Bearer ${ctx.config.adminKey}`)
+      .send({ displayName: 'Commercial' })
+      .expect(200);
+
+    expect(updated.body.displayName).toBe('Commercial');
+    expect(JSON.stringify(updated.body)).not.toContain(basePayload.password);
   });
 });
