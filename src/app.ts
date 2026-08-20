@@ -112,6 +112,19 @@ export const createApp = (ctx: AppContext): express.Express => {
   app.get('/health', (_req, res) => {
     res.status(200).json({ status: 'ok' });
   });
+  app.get('/ready', (_req, res) => {
+    try {
+      ctx.db.ping();
+      const migrations = ctx.db.getMigrationStatus();
+      res.status(migrations.ready ? 200 : 503).json({
+        status: migrations.ready ? 'ready' : 'not_ready',
+        database: 'ok',
+        migrations
+      });
+    } catch {
+      res.status(503).json({ status: 'not_ready', database: 'error' });
+    }
+  });
 
   const adminAuth = requireAdmin(ctx.config);
   const apiAuth = requireProfileToken(ctx.db);

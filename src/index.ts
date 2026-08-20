@@ -11,7 +11,7 @@ import { MailService } from './services/mail-service.js';
 
 const setup = (config: RuntimeConfig) => {
   const logger = new Logger(config.logLevel);
-  const db = new DatabaseService(config.databasePath);
+  const db = new DatabaseService(config.databasePath, { migrate: !config.skipMigrations });
   const crypto = new EncryptionService({ masterKey: config.masterKey });
   const accountService = new AccountService({ db, cryptoService: crypto, config });
   const accessProfileService = new AccessProfileService(db);
@@ -26,12 +26,12 @@ const setup = (config: RuntimeConfig) => {
     logger
   });
 
-  return { app, logger, config };
+  return { app, logger, config, db };
 };
 
 const main = async () => {
   const config = loadConfig();
-  const { app, logger, config: loadedConfig } = setup(config);
+  const { app, logger, config: loadedConfig, db } = setup(config);
 
   const server = createServer(app);
 
@@ -43,11 +43,16 @@ const main = async () => {
     });
   });
 
+  let shuttingDown = false;
   const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     server.close(() => {
+      db.close();
       logger.info('slab-email stopped');
       process.exit(0);
     });
+    setTimeout(() => process.exit(1), 10_000).unref();
   };
 
   process.on('SIGINT', shutdown);

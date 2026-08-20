@@ -29,6 +29,10 @@ const SEARCH_DEFAULT_LIMIT = 20;
 const SEARCH_MAX_LIMIT = 100;
 const SNIPPET_MAX = 340;
 
+const closeSmtpTransport = (transport: Transporter): void => {
+  (transport as Transporter & { close?: () => void }).close?.();
+};
+
 const isLoopbackHost = (host: string): boolean => LOOPBACK_HOSTS.has(host);
 
 const toHeaderList = (addresses: EmailAddress[]): string[] =>
@@ -324,6 +328,8 @@ export class GenericImapSmtpProvider implements Provider {
         latencyMs: Date.now() - started,
         providerMessage: String(error)
       };
+    } finally {
+      closeSmtpTransport(smtp);
     }
   }
 
@@ -496,6 +502,8 @@ export class GenericImapSmtpProvider implements Provider {
         status: 'failed',
         detail: String((error as { message?: string }).message ?? error)
       };
+    } finally {
+      closeSmtpTransport(transport);
     }
   }
 

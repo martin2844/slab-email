@@ -1,4 +1,15 @@
 services:
+  slab-email-migrate:
+    build:
+      context: .
+    image: slab-email:latest
+    environment:
+      DATABASE_PATH: /data/slab-email.db
+    volumes:
+      - ./data:/data
+    command: ["node", "dist/db/migrate.js"]
+    restart: "no"
+
   slab-email:
     build:
       context: .
@@ -18,6 +29,7 @@ services:
       HOST: 0.0.0.0
       PORT: 6981
       DATABASE_PATH: /data/slab-email.db
+      SKIP_MIGRATIONS: "true"
       LOG_LEVEL: info
       MAX_SENDS_PER_ACCOUNT_PER_HOUR: 60
       MCP_ALLOWED_ORIGINS: 127.0.0.1:6981
@@ -25,6 +37,28 @@ services:
       PUBLIC_ADMIN_ALLOWED_ORIGINS: 127.0.0.1:6981
     volumes:
       - ./data:/data
+    depends_on:
+      slab-email-migrate:
+        condition: service_completed_successfully
     ports:
-      - "6981:6981"
+      - "${BIND_ADDRESS:-127.0.0.1}:6981:6981"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:6981/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["node", "dist/index.js"]
