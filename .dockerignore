@@ -1,0 +1,14 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+.gstack
+node_modules
+dist
+coverage
+data
+*.db
+*.db-shm
+*.db-wal
+npm-debug.log*

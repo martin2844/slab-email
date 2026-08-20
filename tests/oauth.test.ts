@@ -52,7 +52,10 @@ describe('OAuth security and validation', () => {
   });
 
   it('requires Google OAuth credentials on connect endpoint', async () => {
-    const ctxWithoutGoogle = createTestContext({ googleClientId: '', googleClientSecret: '' });
+    const ctxWithoutGoogle = createTestContext({
+      googleClientId: '',
+      googleClientSecret: ''
+    });
 
     const res = await request(ctxWithoutGoogle.app)
       .post('/api/accounts/gmail/connect')
@@ -62,5 +65,17 @@ describe('OAuth security and validation', () => {
 
     expect(res.body.error.code).toBe('INVALID_CONFIGURATION');
     ctxWithoutGoogle.cleanup();
+  });
+
+  it('uses the requested control-plane callback throughout the OAuth flow', async () => {
+    const callback = 'http://127.0.0.1:3009/api/integrations/email/google/callback';
+    const response = await request(ctx.app)
+      .post('/api/accounts/gmail/connect')
+      .set('Authorization', `Bearer ${ctx.config.adminKey}`)
+      .send({ returnUrl: callback })
+      .expect(200);
+
+    const authorizationUrl = new URL(response.body.authorizationUrl);
+    expect(authorizationUrl.searchParams.get('redirect_uri')).toBe(callback);
   });
 });

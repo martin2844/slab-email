@@ -4,33 +4,34 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
-  test:
-    name: test
-    runs-on: ubuntu-latest
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: 22
           cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
+      - run: npm ci
+      - name: Lint shell scripts
+        run: shellcheck scripts/*.sh docker-entrypoint.sh
+      - name: Test
+        run: npm test
       - name: Lint
         run: npm run lint
-
       - name: Typecheck
         run: npm run typecheck
-
-      - name: Test
-        run: npm run test
-
-      - name: Build
+      - name: Production build
         run: npm run build
+      - name: Build container
+        run: docker build --tag slab-email:ci .
+      - name: Smoke container
+        env:
+          SLAB_EMAIL_SMOKE_IMAGE: slab-email:ci
+        run: ./scripts/container-smoke.sh

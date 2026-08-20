@@ -42,7 +42,10 @@ const toolError = (error: unknown) => {
   const detail = error instanceof ApiError && error.details ? JSON.stringify(error.details) : undefined;
   return {
     content: textContent(detail ? `${normalized} ${detail}` : normalized),
-    structuredContent: asStructuredContent({ error: sanitizeError(error), code: error instanceof ApiError ? error.code : ERROR_CODES.INTERNAL_ERROR })
+    structuredContent: asStructuredContent({
+      error: sanitizeError(error),
+      code: error instanceof ApiError ? error.code : ERROR_CODES.INTERNAL_ERROR
+    })
   };
 };
 
@@ -81,14 +84,11 @@ const searchInputSchema = z.object({
   since: z.string().trim().optional(),
   before: z.string().trim().optional(),
   unread: z.coerce.boolean().optional(),
-  limit: z.preprocess(
-    (value) => {
-      if (value === undefined) return undefined;
-      const parsed = typeof value === 'string' ? Number.parseInt(value, 10) : Number(value);
-      return Number.isFinite(parsed) ? parsed : undefined;
-    },
-    z.number().int().min(1).max(100).optional()
-  ),
+  limit: z.preprocess((value) => {
+    if (value === undefined) return undefined;
+    const parsed = typeof value === 'string' ? Number.parseInt(value, 10) : Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }, z.number().int().min(1).max(100).optional()),
   cursor: z.string().trim().optional()
 });
 
@@ -133,202 +133,212 @@ export const createMcpTools = (
   req: AuthenticatedRequest,
   _context: McpContext
 ): void => {
-  server.registerTool(
-    'email_list_accounts',
-    {
-      description: 'List accounts visible for this access profile',
-      annotations: READ_ONLY_TOOL
-    },
-    async (_extra) => {
-      const accounts = mailService.listAccounts(req).map((account) => ({
-        id: account.id,
-        email: account.emailAddress,
-        provider: account.provider,
-        capabilities: {
-          read: account.capabilities.read,
-          draft: account.capabilities.draft,
-          send: account.capabilities.send,
-          reply: account.capabilities.reply,
-          search: account.capabilities.search,
-          threads: account.capabilities.threads
-        }
-      }));
+  const profile = req.authContext?.type === 'profile' ? req.authContext.profile : undefined;
+  if (!profile) return;
+
+  if (profile.readEnabled)
+    server.registerTool(
+      'email_list_accounts',
+      {
+        description: 'List accounts visible for this access profile',
+        annotations: READ_ONLY_TOOL
+      },
+      async (_extra) => {
+        const accounts = mailService.listAccounts(req).map((account) => ({
+          id: account.id,
+          email: account.emailAddress,
+          provider: account.provider,
+          capabilities: {
+            read: account.capabilities.read,
+            draft: account.capabilities.draft,
+            send: account.capabilities.send,
+            reply: account.capabilities.reply,
+            search: account.capabilities.search,
+            threads: account.capabilities.threads
+          }
+        }));
 
         return {
           structuredContent: asStructuredContent({ items: accounts }),
           content: textContent(`accounts: ${accounts.length}`)
         };
-    }
-  );
+      }
+    );
 
-  server.registerTool(
-    'email_search',
-    {
-      description: 'Search messages on a connected account',
-      inputSchema: searchInputSchema,
-      annotations: READ_ONLY_TOOL
-    },
-    async (rawArgs, _extra) => {
-      const args = searchInputSchema.parse(rawArgs);
-      try {
-        const result = await mailService.search(req, {
-          accountId: args.accountId,
-          query: args.query,
-          from: args.from,
-          to: args.to,
-          subject: args.subject,
-          since: args.since,
-          before: args.before,
-          unread: args.unread,
-          limit: args.limit,
-          cursor: args.cursor
-        });
-        return {
-          structuredContent: asStructuredContent(result),
-          content: textContent(`search results: ${result.items.length}`)
-        };
-      } catch (error) {
-        return toolError(error);
+  if (profile.readEnabled)
+    server.registerTool(
+      'email_search',
+      {
+        description: 'Search messages on a connected account',
+        inputSchema: searchInputSchema,
+        annotations: READ_ONLY_TOOL
+      },
+      async (rawArgs, _extra) => {
+        const args = searchInputSchema.parse(rawArgs);
+        try {
+          const result = await mailService.search(req, {
+            accountId: args.accountId,
+            query: args.query,
+            from: args.from,
+            to: args.to,
+            subject: args.subject,
+            since: args.since,
+            before: args.before,
+            unread: args.unread,
+            limit: args.limit,
+            cursor: args.cursor
+          });
+          return {
+            structuredContent: asStructuredContent(result),
+            content: textContent(`search results: ${result.items.length}`)
+          };
+        } catch (error) {
+          return toolError(error);
+        }
       }
-    }
-  );
+    );
 
-  server.registerTool(
-    'email_get_message',
-    {
-      description: 'Get message by account and message id',
-      inputSchema: getMessageInputSchema,
-      annotations: READ_ONLY_TOOL
-    },
-    async (rawArgs, _extra) => {
-      const args = getMessageInputSchema.parse(rawArgs);
-      try {
-        const message = await mailService.getMessage(req, args.accountId, args.messageId);
-        return {
-          structuredContent: asStructuredContent(message),
-          content: textContent(`${message.subject || '(no subject)'} ${message.id}`)
-        };
-      } catch (error) {
-        return toolError(error);
+  if (profile.readEnabled)
+    server.registerTool(
+      'email_get_message',
+      {
+        description: 'Get message by account and message id',
+        inputSchema: getMessageInputSchema,
+        annotations: READ_ONLY_TOOL
+      },
+      async (rawArgs, _extra) => {
+        const args = getMessageInputSchema.parse(rawArgs);
+        try {
+          const message = await mailService.getMessage(req, args.accountId, args.messageId);
+          return {
+            structuredContent: asStructuredContent(message),
+            content: textContent(`${message.subject || '(no subject)'} ${message.id}`)
+          };
+        } catch (error) {
+          return toolError(error);
+        }
       }
-    }
-  );
+    );
 
-  server.registerTool(
-    'email_list_threads',
-    {
-      description: 'Read all messages for a thread',
-      inputSchema: listThreadInputSchema,
-      annotations: READ_ONLY_TOOL
-    },
-    async (rawArgs, _extra) => {
-      const args = listThreadInputSchema.parse(rawArgs);
-      try {
-        const thread = await mailService.getThread(req, args.accountId, args.threadId);
-        return {
-          structuredContent: asStructuredContent({ items: thread }),
-          content: textContent(`thread size: ${thread.length}`)
-        };
-      } catch (error) {
-        return toolError(error);
+  if (profile.readEnabled)
+    server.registerTool(
+      'email_list_threads',
+      {
+        description: 'Read all messages for a thread',
+        inputSchema: listThreadInputSchema,
+        annotations: READ_ONLY_TOOL
+      },
+      async (rawArgs, _extra) => {
+        const args = listThreadInputSchema.parse(rawArgs);
+        try {
+          const thread = await mailService.getThread(req, args.accountId, args.threadId);
+          return {
+            structuredContent: asStructuredContent({ items: thread }),
+            content: textContent(`thread size: ${thread.length}`)
+          };
+        } catch (error) {
+          return toolError(error);
+        }
       }
-    }
-  );
+    );
 
-  server.registerTool(
-    'email_create_draft',
-    {
-      description: 'Create a remote draft message',
-      inputSchema: draftInputSchema,
-      annotations: WRITE_TOOL
-    },
-    async (rawArgs, _extra) => {
-      const args = draftInputSchema.parse(rawArgs);
-      try {
-        const result = await mailService.createDraft(req, {
-          accountId: args.accountId,
-          to: parseAddressField(args.to),
-          cc: ensureArray(args.cc)?.map((entry) => ({ address: entry })),
-          bcc: ensureArray(args.bcc)?.map((entry) => ({ address: entry })),
-          subject: args.subject,
-          text: args.text,
-          html: args.html
-        });
-        return {
-          structuredContent: asStructuredContent(result),
-          content: textContent(`draft: ${result.draftId}`)
-        };
-      } catch (error) {
-        return toolError(error);
+  if (profile.draftEnabled)
+    server.registerTool(
+      'email_create_draft',
+      {
+        description: 'Create a remote draft message',
+        inputSchema: draftInputSchema,
+        annotations: WRITE_TOOL
+      },
+      async (rawArgs, _extra) => {
+        const args = draftInputSchema.parse(rawArgs);
+        try {
+          const result = await mailService.createDraft(req, {
+            accountId: args.accountId,
+            to: parseAddressField(args.to),
+            cc: ensureArray(args.cc)?.map((entry) => ({ address: entry })),
+            bcc: ensureArray(args.bcc)?.map((entry) => ({ address: entry })),
+            subject: args.subject,
+            text: args.text,
+            html: args.html
+          });
+          return {
+            structuredContent: asStructuredContent(result),
+            content: textContent(`draft: ${result.draftId}`)
+          };
+        } catch (error) {
+          return toolError(error);
+        }
       }
-    }
-  );
+    );
 
-  server.registerTool(
-    'email_send',
-    {
-      description: 'Send email with required idempotencyKey',
-      inputSchema: sendInputSchema,
-      annotations: WRITE_TOOL
-    },
-    async (rawArgs, _extra) => {
-      const args = sendInputSchema.parse(rawArgs);
-      if (!args.idempotencyKey) {
-        return toolError(new ApiError(ERROR_CODES.INVALID_INPUT, 'idempotencyKey is required for email_send', 400));
+  if (profile.sendEnabled)
+    server.registerTool(
+      'email_send',
+      {
+        description: 'Send email with required idempotencyKey',
+        inputSchema: sendInputSchema,
+        annotations: WRITE_TOOL
+      },
+      async (rawArgs, _extra) => {
+        const args = sendInputSchema.parse(rawArgs);
+        if (!args.idempotencyKey) {
+          return toolError(new ApiError(ERROR_CODES.INVALID_INPUT, 'idempotencyKey is required for email_send', 400));
+        }
+        try {
+          const result = await mailService.send(req, {
+            accountId: args.accountId,
+            to: parseAddressField(args.to),
+            cc: ensureArray(args.cc)?.map((entry) => ({ address: entry })),
+            bcc: ensureArray(args.bcc)?.map((entry) => ({ address: entry })),
+            subject: args.subject,
+            text: args.text,
+            html: args.html,
+            idempotencyKey: args.idempotencyKey
+          });
+          return {
+            structuredContent: asStructuredContent(result),
+            content: textContent(`send: ${result.status}`)
+          };
+        } catch (error) {
+          return toolError(error);
+        }
       }
-      try {
-        const result = await mailService.send(req, {
-          accountId: args.accountId,
-          to: parseAddressField(args.to),
-          cc: ensureArray(args.cc)?.map((entry) => ({ address: entry })),
-          bcc: ensureArray(args.bcc)?.map((entry) => ({ address: entry })),
-          subject: args.subject,
-          text: args.text,
-          html: args.html,
-          idempotencyKey: args.idempotencyKey
-        });
-        return {
-          structuredContent: asStructuredContent(result),
-          content: textContent(`send: ${result.status}`)
-        };
-      } catch (error) {
-        return toolError(error);
-      }
-    }
-  );
+    );
 
-  server.registerTool(
-    'email_reply',
-    {
-      description: 'Reply to a message with required idempotencyKey',
-      inputSchema: replyInputSchema,
-      annotations: WRITE_TOOL
-    },
-    async (rawArgs, _extra) => {
-      const args = replyInputSchema.parse(rawArgs);
-      if (!args.idempotencyKey) {
-        return toolError(new ApiError(ERROR_CODES.INVALID_INPUT, 'idempotencyKey is required for email_reply', 400));
+  if (profile.sendEnabled)
+    server.registerTool(
+      'email_reply',
+      {
+        description: 'Reply to a message with required idempotencyKey',
+        inputSchema: replyInputSchema,
+        annotations: WRITE_TOOL
+      },
+      async (rawArgs, _extra) => {
+        const args = replyInputSchema.parse(rawArgs);
+        if (!args.idempotencyKey) {
+          return toolError(new ApiError(ERROR_CODES.INVALID_INPUT, 'idempotencyKey is required for email_reply', 400));
+        }
+        try {
+          const result = await mailService.reply(req, {
+            accountId: args.accountId,
+            messageId: args.messageId,
+            to: ensureArray(args.to)?.map((entry) => ({ address: entry })),
+            cc: ensureArray(args.cc)?.map((entry) => ({ address: entry })),
+            text: args.text,
+            html: args.html,
+            replyAll: args.replyAll,
+            idempotencyKey: args.idempotencyKey
+          });
+          return {
+            structuredContent: asStructuredContent(result),
+            content: textContent(`reply: ${result.status}`)
+          };
+        } catch (error) {
+          return toolError(error);
+        }
       }
-      try {
-        const result = await mailService.reply(req, {
-          accountId: args.accountId,
-          messageId: args.messageId,
-          to: ensureArray(args.to)?.map((entry) => ({ address: entry })),
-          cc: ensureArray(args.cc)?.map((entry) => ({ address: entry })),
-          text: args.text,
-          html: args.html,
-          replyAll: args.replyAll,
-          idempotencyKey: args.idempotencyKey
-        });
-        return {
-          structuredContent: asStructuredContent(result),
-          content: textContent(`reply: ${result.status}`)
-        };
-      } catch (error) {
-        return toolError(error);
-      }
-    }
-  );
+    );
 };
 
 export const createMcpServer = (name: string, version: string): McpServer => {

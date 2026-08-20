@@ -17,7 +17,7 @@ Two auth domains are used:
   - Required for account/profile setup and management.
 - **Connector token**
   - Header: `Authorization: Bearer <connectorToken>`
--profile token required for all operational account actions and MCP.
+    -profile token required for all operational account actions and MCP.
 
 ## Common error response
 
@@ -79,15 +79,18 @@ Generic IMAP/SMTP account with same payload as Proton Bridge route.
 
 ### `GET /api/accounts`
 
-Returns accounts visible for the presented connector token.
+With the admin key, returns all account metadata. With a connector token,
+returns only accounts visible to that profile. Neither response includes
+credentials.
 
 ### `GET /api/accounts/:id`
 
 Returns account metadata and caps (no secrets).
 
-### `POST /api/accounts/:id`
+### `PATCH /api/accounts/:id`
 
 Patch account metadata/config and optionally credentials (`username`, `password`).
+`POST` remains available as a backwards-compatible alias.
 
 ### `DELETE /api/accounts/:id`
 
@@ -305,7 +308,7 @@ Send reply linked to message.
 
 ## Notes
 
-- `GET /api/accounts` and all `/api/mail/*` are for connector-scoped tokens.
+- `GET /api/accounts` accepts either admin auth or a connector-scoped token;
+  all `/api/mail/*` routes require connector scope.
 - Admin operations never return secrets.
 - Secrets are stored encrypted, never in plain text.
-

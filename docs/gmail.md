@@ -28,13 +28,14 @@ Body:
 
 ```json
 {
-  "returnUrl": "http://127.0.0.1:6981/agents"
+  "returnUrl": "http://127.0.0.1:3009/api/integrations/email/google/callback"
 }
 ```
 
 4. Open returned `authorizationUrl` in browser.
 5. Approve permissions.
-6. Google redirects to:
+6. Google redirects to the supplied `returnUrl`. A control plane can proxy the
+   `code` and `state` to:
 
 `/api/oauth/google/callback?code=...&state=...`
 

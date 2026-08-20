@@ -52,7 +52,7 @@ describe('permission boundaries', () => {
       })
       .expect(403);
 
-    expect(res.body.error.code).toBe('SEND_DISABLED');
+    expect(res.body.error.code).toBe('PERMISSION_DENIED');
 
     const draftRes = await request(ctx.app)
       .post('/api/mail/drafts')

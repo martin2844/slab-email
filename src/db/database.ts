@@ -90,18 +90,19 @@ interface SendOperationRow {
 export class DatabaseService {
   private readonly db: Database.Database;
 
-  constructor(databasePath: string) {
+  constructor(databasePath: string, options: { migrate?: boolean } = {}) {
     const resolved = path.resolve(databasePath);
     fs.mkdirSync(path.dirname(resolved), { recursive: true });
     this.db = new Database(resolved);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('synchronous = NORMAL');
-    this.migrate();
+    if (options.migrate !== false) this.migrate();
   }
 
-  private migrate(): void {
-    this.db.exec(`
+  migrate(): void {
+    const apply = this.db.transaction(() => {
+      this.db.exec(`
       CREATE TABLE IF NOT EXISTS email_accounts (
         id TEXT PRIMARY KEY,
         provider TEXT NOT NULL CHECK(provider IN ('proton_bridge','imap_smtp','gmail')),
@@ -178,13 +179,42 @@ export class DatabaseService {
       );
     `);
 
-    this.db.exec(`
+      this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_send_operations_lookup ON send_operations(account_id, idempotency_key);
       CREATE INDEX IF NOT EXISTS idx_send_operations_created_at ON send_operations(account_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_profile_accounts_account ON access_profile_accounts(account_id);
       CREATE INDEX IF NOT EXISTS idx_access_tokens_profile ON access_tokens(profile_id);
       CREATE INDEX IF NOT EXISTS idx_oauth_states_expires ON oauth_states(expires_at);
-    `);
+      `);
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          name TEXT NOT NULL,
+          applied_at TEXT NOT NULL
+        );
+      `);
+      this.db.prepare(
+        'INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES (1, ?, ?)'
+      ).run('initial_email_schema', nowIso());
+    });
+    apply.immediate();
+  }
+
+  getMigrationStatus(): { ready: boolean; expected: number[]; applied: number[]; pending: number[] } {
+    const table = this.db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+    ).get();
+    const applied = table
+      ? (this.db.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as Array<{
+          version: number;
+        }>).map(({ version }) => version)
+      : [];
+    const pending = applied.includes(1) ? [] : [1];
+    return { ready: pending.length === 0, expected: [1], applied, pending };
+  }
+
+  ping(): void {
+    this.db.prepare('SELECT 1').get();
   }
 
   getEmailAccounts(): AccountRecord[] {
@@ -800,6 +830,12 @@ export class DatabaseService {
   }
 
   close(): void {
+    if (!this.db.open) return;
+    try {
+      this.db.pragma('wal_checkpoint(PASSIVE)');
+    } catch {
+      // Another process may still hold the shared WAL. Closing remains safe.
+    }
     this.db.close();
   }
 

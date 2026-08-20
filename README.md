@@ -88,6 +88,7 @@ npm run dev
 Expected:
 
 - `GET /health` → `{"status":"ok"}`.
+- `GET /ready` → SQLite and packaged migrations are ready.
 - `/mcp` available on `POST /mcp`.
 
 ### 2) Register a scoped profile + token
@@ -102,14 +103,27 @@ Required / relevant environment variables:
 - `PORT` (default `6981`)
 - `DATABASE_PATH` (default `./data/slab-email.db`)
 - `SLAB_EMAIL_ADMIN_KEY` (required)
+- `SLAB_EMAIL_ADMIN_KEY_FILE` (mounted-file alternative)
 - `SLAB_EMAIL_MASTER_KEY` (required, 32-byte key)
+- `SLAB_EMAIL_MASTER_KEY_FILE` (mounted-file alternative)
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
+- `GOOGLE_CLIENT_SECRET_FILE` (mounted-file alternative)
 - `GOOGLE_REDIRECT_URI` (default `http://127.0.0.1:6981/api/oauth/google/callback`)
 - `MAX_SENDS_PER_ACCOUNT_PER_HOUR` (default `60`)
 - `MCP_ALLOWED_ORIGINS` (comma-separated)
 - `MCP_ALLOWED_ORIGINS_HOSTS` (comma-separated)
 - `PUBLIC_ADMIN_ALLOWED_ORIGINS` (comma-separated)
+- `SKIP_MIGRATIONS` (set to `true` only after the one-shot migration command succeeds)
+
+Direct secret values and their corresponding `_FILE` variables are mutually
+exclusive. The unified self-hosted stack uses mounted secret files. Run its
+deterministic migration job with:
+
+```bash
+docker run --rm -v slab-email-data:/data ghcr.io/martin2844/slab-email:<version> \
+  node dist/db/migrate.js
+```
 
 See `.env.example` for the minimum bootstrap.
 
@@ -123,6 +137,11 @@ See `.env.example` for the minimum bootstrap.
    - `POST /api/accounts/:id/test`
 
 This project intentionally does not implement Proton login automation. Use only Bridge-generated credentials.
+
+Proton Bridge must be reachable from the host running `slab-email`. A Bridge on
+a laptop or Windows workstation is not reachable from a remote VPS. For a VPS
+deployment, run Bridge on that server through a separately maintained setup, or
+use Gmail/generic IMAP-SMTP whose provider endpoint is network-accessible.
 
 See [docs/proton.md](docs/proton.md).
 
@@ -144,6 +163,7 @@ See [docs/gmail.md](docs/gmail.md).
 
 - Base:
   - `GET /health`
+  - `GET /ready`
   - `/api/*`
   - `POST /mcp`
 - Authentication:

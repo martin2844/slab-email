@@ -19,10 +19,19 @@ import { clampText, firstTextOrBody, normalizeAddressList } from '../../utils/me
 import { Provider } from '../types.js';
 import type { GenericImapSmtpProviderConfig } from './types.js';
 
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+const LOOPBACK_HOSTS = new Set([
+  '127.0.0.1',
+  'localhost',
+  '[::1]',
+  'host.docker.internal'
+]);
 const SEARCH_DEFAULT_LIMIT = 20;
 const SEARCH_MAX_LIMIT = 100;
 const SNIPPET_MAX = 340;
+
+const closeSmtpTransport = (transport: Transporter): void => {
+  (transport as Transporter & { close?: () => void }).close?.();
+};
 
 const isLoopbackHost = (host: string): boolean => LOOPBACK_HOSTS.has(host);
 
@@ -319,6 +328,8 @@ export class GenericImapSmtpProvider implements Provider {
         latencyMs: Date.now() - started,
         providerMessage: String(error)
       };
+    } finally {
+      closeSmtpTransport(smtp);
     }
   }
 
@@ -491,6 +502,8 @@ export class GenericImapSmtpProvider implements Provider {
         status: 'failed',
         detail: String((error as { message?: string }).message ?? error)
       };
+    } finally {
+      closeSmtpTransport(transport);
     }
   }
 

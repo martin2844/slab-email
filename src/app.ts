@@ -24,7 +24,7 @@ import {
   replySchema,
   searchParamsSchema
 } from './api/schemas.js';
-import { requireAdmin, requireProfileToken, AuthenticatedRequest } from './middleware/auth.js';
+import { requireAdmin, requireProfileToken, getBearerToken, AuthenticatedRequest } from './middleware/auth.js';
 import { ApiError, ApiErrorPayload, ERROR_CODES } from './types/errors.js';
 import { hashText } from './config/env.js';
 import { buildOriginMatcher, isOriginAllowed } from './utils/origin.js';
@@ -76,7 +76,7 @@ const safeString = (value: unknown, fallback = ''): string => (typeof value === 
 
 const safeParam = (params: Record<string, string | string[]>, key: string): string => {
   const raw = params[key];
-  return typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.find((entry) => typeof entry === 'string') ?? '' : '';
+  return typeof raw === 'string' ? raw : Array.isArray(raw) ? (raw.find((entry) => typeof entry === 'string') ?? '') : '';
 };
 
 const firstQueryValue = (value: unknown): string | undefined => {
@@ -112,9 +112,41 @@ export const createApp = (ctx: AppContext): express.Express => {
   app.get('/health', (_req, res) => {
     res.status(200).json({ status: 'ok' });
   });
+  app.get('/ready', (_req, res) => {
+    try {
+      ctx.db.ping();
+      const migrations = ctx.db.getMigrationStatus();
+      res.status(migrations.ready ? 200 : 503).json({
+        status: migrations.ready ? 'ready' : 'not_ready',
+        database: 'ok',
+        migrations
+      });
+    } catch {
+      res.status(503).json({ status: 'not_ready', database: 'error' });
+    }
+  });
 
   const adminAuth = requireAdmin(ctx.config);
   const apiAuth = requireProfileToken(ctx.db);
+
+  app.get('/api/accounts', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    if (getBearerToken(req) === ctx.config.adminKey || req.header('x-slab-admin-key') === ctx.config.adminKey) {
+      req.authContext = { type: 'admin' };
+      res.status(200).json(ctx.accountService.listAccounts());
+      return;
+    }
+    await apiAuth(req, res, (error?: unknown) => {
+      if (error) {
+        next(error);
+        return;
+      }
+      try {
+        res.status(200).json(ctx.mailService.listAccounts(req));
+      } catch (listError) {
+        next(listError);
+      }
+    });
+  });
 
   app.get('/api/health', adminAuth, (_req, res) => {
     res.status(200).json({ status: 'ok' });
@@ -160,7 +192,7 @@ export const createApp = (ctx: AppContext): express.Express => {
     }
   });
 
-  adminRouter.post('/accounts/:id', adminAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  const updateAccount = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
       const parsed = patchAccountSchema.parse(req.body);
       const id = safeParam(req.params as Record<string, string | string[]>, 'id');
@@ -180,7 +212,11 @@ export const createApp = (ctx: AppContext): express.Express => {
     } catch (error) {
       next(error);
     }
-  });
+  };
+
+  adminRouter.patch('/accounts/:id', adminAuth, updateAccount);
+  // Backwards-compatible alias for clients created before PATCH was exposed.
+  adminRouter.post('/accounts/:id', adminAuth, updateAccount);
 
   adminRouter.delete('/accounts/:id', adminAuth, (req: AuthenticatedRequest, res: Response) => {
     const accountId = safeParam(req.params as Record<string, string | string[]>, 'id');
@@ -214,7 +250,12 @@ export const createApp = (ctx: AppContext): express.Express => {
     try {
       const payload = gmailConnectSchema.parse(req.body ?? {});
       const { authorizationUrl, state, expiresAt } = ctx.accountService.createGmailAuthorizationUrl(payload);
-      res.status(200).json({ authorizationUrl, state, expiresAt, stateExpiresAt: expiresAt });
+      res.status(200).json({
+        authorizationUrl,
+        state,
+        expiresAt,
+        stateExpiresAt: expiresAt
+      });
     } catch (error) {
       next(error);
     }
@@ -281,11 +322,6 @@ export const createApp = (ctx: AppContext): express.Express => {
 
   const mailRouter = express.Router();
   mailRouter.use(apiAuth);
-
-  mailRouter.get('/accounts', (req: AuthenticatedRequest, res: Response) => {
-    const accounts = ctx.mailService.listAccounts(req);
-    res.status(200).json(accounts);
-  });
 
   mailRouter.get('/mail/search', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
@@ -407,6 +443,36 @@ export const createApp = (ctx: AppContext): express.Express => {
     }
 
     const requestId = req.header('x-request-id') ?? randomUUID();
+    const requestedTool = req.body?.method === 'tools/call' && typeof req.body?.params?.name === 'string' ? req.body.params.name : null;
+    const profile = context.profile;
+    const deniedCapability =
+      (requestedTool === 'email_create_draft' && !profile?.draftEnabled) ||
+      (['email_send', 'email_reply'].includes(requestedTool ?? '') && !profile?.sendEnabled) ||
+      (['email_list_accounts', 'email_search', 'email_get_message', 'email_list_threads'].includes(requestedTool ?? '') && !profile?.readEnabled);
+    if (deniedCapability) {
+      const payload = {
+        jsonrpc: '2.0',
+        id: req.body?.id ?? null,
+        result: {
+          isError: true,
+          content: [
+            {
+              type: 'text',
+              text: 'PERMISSION_DENIED: tool is not enabled for this access profile'
+            }
+          ],
+          structuredContent: {
+            code: ERROR_CODES.PERMISSION_DENIED,
+            error: 'tool is not enabled for this access profile'
+          }
+        }
+      };
+      res
+        .status(200)
+        .type('text/event-stream')
+        .send(`event: message\ndata: ${JSON.stringify(payload)}\n\n`);
+      return;
+    }
     const server = createMcpServer('slab-email', '0.1.0');
     createMcpTools(server, ctx.mailService, req, {
       profileId: context.profileId ?? 'unknown',

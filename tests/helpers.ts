@@ -50,6 +50,7 @@ export const createTestContext = (overrides: Partial<RuntimeConfig> = {}): TestC
       'https://www.googleapis.com/auth/gmail.compose',
       'https://www.googleapis.com/auth/gmail.send'
     ],
+    skipMigrations: false,
     ...overrides,
     databasePath: dbPath
   };

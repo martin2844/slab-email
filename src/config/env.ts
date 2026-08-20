@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { z } from 'zod';
 
 const parseCsv = (value: unknown): string[] =>
@@ -36,6 +37,7 @@ const envSchema = z.object({
     z.boolean().default(false)
   ),
   SMTP_MESSAGE_ID_DOMAIN: z.string().trim().optional(),
+  SKIP_MIGRATIONS: z.enum(['true', 'false']).default('false'),
   GMAIL_SCOPE_READ: z
     .string()
     .trim()
@@ -69,7 +71,27 @@ export interface RuntimeConfig {
   allowInsecureLoopback: boolean;
   smtpMessageIdDomain?: string;
   gmailScopes: string[];
+  skipMigrations: boolean;
 }
+
+const readSecret = (
+  environment: Record<string, string | undefined>,
+  valueName: string,
+  fileName: string
+): string => {
+  const direct = environment[valueName]?.trim();
+  const filePath = environment[fileName]?.trim();
+  if (direct && filePath) throw new Error(`Set only one of ${valueName} or ${fileName}`);
+  if (filePath) {
+    try {
+      return fs.readFileSync(filePath, 'utf8').trim();
+    } catch {
+      throw new Error(`${fileName} could not be read`);
+    }
+  }
+  if (direct) return direct;
+  return '';
+};
 
 const parseMasterKey = (raw: string): Buffer => {
   if (/^[0-9a-fA-F]{64}$/.test(raw)) {
@@ -89,8 +111,27 @@ const parseMasterKey = (raw: string): Buffer => {
   );
 };
 
-export const loadConfig = (): RuntimeConfig => {
-  const parsed = envSchema.parse(process.env);
+export const loadConfig = (
+  environment: Record<string, string | undefined> = process.env
+): RuntimeConfig => {
+  const parsed = envSchema.parse({
+    ...environment,
+    SLAB_EMAIL_ADMIN_KEY: readSecret(
+      environment,
+      'SLAB_EMAIL_ADMIN_KEY',
+      'SLAB_EMAIL_ADMIN_KEY_FILE'
+    ),
+    SLAB_EMAIL_MASTER_KEY: readSecret(
+      environment,
+      'SLAB_EMAIL_MASTER_KEY',
+      'SLAB_EMAIL_MASTER_KEY_FILE'
+    ),
+    GOOGLE_CLIENT_SECRET: readSecret(
+      environment,
+      'GOOGLE_CLIENT_SECRET',
+      'GOOGLE_CLIENT_SECRET_FILE'
+    )
+  });
   const gmailScopes = [parsed.GMAIL_SCOPE_READ, parsed.GMAIL_SCOPE_COMPOSE, parsed.GMAIL_SCOPE_SEND];
   return {
     nodeEnv: parsed.NODE_ENV,
@@ -109,7 +150,8 @@ export const loadConfig = (): RuntimeConfig => {
     publicAdminAllowedOrigins: parsed.PUBLIC_ADMIN_ALLOWED_ORIGINS,
     allowInsecureLoopback: parsed.NODE_ENV_ALLOW_INSECURE_LOCAL,
     smtpMessageIdDomain: parsed.SMTP_MESSAGE_ID_DOMAIN || undefined,
-    gmailScopes
+    gmailScopes,
+    skipMigrations: parsed.SKIP_MIGRATIONS === 'true'
   };
 };
 
