@@ -19,19 +19,19 @@ describe('database lifecycle', () => {
     try {
       expect(database.getMigrationStatus()).toEqual({
         ready: false,
-        expected: [1],
+        expected: [1, 2],
         applied: [],
-        pending: [1]
+        pending: [1, 2]
       });
       database.migrate();
       expect(database.getMigrationStatus()).toEqual({
         ready: true,
-        expected: [1],
-        applied: [1],
+        expected: [1, 2],
+        applied: [1, 2],
         pending: []
       });
       database.migrate();
-      expect(database.getMigrationStatus().applied).toEqual([1]);
+      expect(database.getMigrationStatus().applied).toEqual([1, 2]);
     } finally {
       database.close();
     }

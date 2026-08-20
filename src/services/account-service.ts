@@ -74,6 +74,14 @@ export interface GmailCallbackInput {
   code: string;
 }
 
+export interface GoogleOAuthSettings {
+  configured: boolean;
+  clientId: string;
+  hasClientSecret: boolean;
+  source: 'stored' | 'environment' | 'missing';
+  updatedAt: string | null;
+}
+
 export interface AccountServiceDependencies {
   db: DatabaseService;
   cryptoService: EncryptionService;
@@ -242,7 +250,94 @@ export class AccountService {
       refreshToken?: string;
     }>(secret);
 
-    return createProvider(account, parsed, this.deps.config);
+    const google =
+      account.provider === 'gmail'
+        ? this.resolveGoogleOAuthCredentials()
+        : {
+            clientId: this.deps.config.googleClientId,
+            clientSecret: this.deps.config.googleClientSecret
+          };
+    return createProvider(account, parsed, {
+      ...this.deps.config,
+      googleClientId: google.clientId,
+      googleClientSecret: google.clientSecret
+    });
+  }
+
+  getGoogleOAuthSettings(): GoogleOAuthSettings {
+    const stored = this.deps.db.getProviderCredentials('google_oauth');
+    if (stored) {
+      return {
+        configured: true,
+        clientId: stored.publicIdentifier,
+        hasClientSecret: true,
+        source: 'stored',
+        updatedAt: stored.updatedAt
+      };
+    }
+
+    const configured = Boolean(
+      this.deps.config.googleClientId && this.deps.config.googleClientSecret
+    );
+    return {
+      configured,
+      clientId: configured ? this.deps.config.googleClientId : '',
+      hasClientSecret: configured,
+      source: configured ? 'environment' : 'missing',
+      updatedAt: null
+    };
+  }
+
+  saveGoogleOAuthSettings(input: {
+    clientId: string;
+    clientSecret?: string;
+  }): GoogleOAuthSettings {
+    const existing = this.deps.db.getProviderCredentials('google_oauth');
+    let clientSecret = input.clientSecret;
+    if (!clientSecret && existing) {
+      clientSecret = safeJsonParse<{ clientSecret: string }>(
+        this.deps.cryptoService.decrypt(existing)
+      ).clientSecret;
+    }
+    if (!clientSecret) {
+      throw new ApiError(
+        ERROR_CODES.INVALID_INPUT,
+        'Google OAuth client secret is required when configuring stored credentials',
+        400
+      );
+    }
+
+    const encrypted = this.deps.cryptoService.encrypt(
+      JSON.stringify({ clientSecret })
+    );
+    this.deps.db.setProviderCredentials(
+      'google_oauth',
+      input.clientId,
+      encrypted.encryptedPayload,
+      encrypted.iv,
+      encrypted.authTag
+    );
+    return this.getGoogleOAuthSettings();
+  }
+
+  private resolveGoogleOAuthCredentials(): {
+    clientId: string;
+    clientSecret: string;
+  } {
+    const stored = this.deps.db.getProviderCredentials('google_oauth');
+    if (stored) {
+      const decrypted = safeJsonParse<{ clientSecret: string }>(
+        this.deps.cryptoService.decrypt(stored)
+      );
+      return {
+        clientId: stored.publicIdentifier,
+        clientSecret: decrypted.clientSecret
+      };
+    }
+    return {
+      clientId: this.deps.config.googleClientId,
+      clientSecret: this.deps.config.googleClientSecret
+    };
   }
 
   private getDecryptedSecrets(accountId: string): { username?: string; password?: string; refreshToken?: string } {
@@ -272,13 +367,14 @@ export class AccountService {
     const codeChallenge = generatePkceCodeChallenge(codeVerifier);
 
     const redirectUri = options.returnUrl ?? this.deps.config.googleRedirectUri;
-    if (!this.deps.config.googleClientId || !this.deps.config.googleClientSecret) {
+    const google = this.resolveGoogleOAuthCredentials();
+    if (!google.clientId || !google.clientSecret) {
       throw new ApiError(ERROR_CODES.INVALID_CONFIGURATION, 'Missing Google OAuth credentials', 400);
     }
 
     const url = GmailProviderBuildAuthorizationUrl({
-      clientId: this.deps.config.googleClientId,
-      clientSecret: this.deps.config.googleClientSecret,
+      clientId: google.clientId,
+      clientSecret: google.clientSecret,
       redirectUri,
       scopes: this.deps.config.gmailScopes,
       state,
@@ -323,9 +419,13 @@ export class AccountService {
     }
 
     const meta = state.meta as OAuthMetaState;
+    const googleCredentials = this.resolveGoogleOAuthCredentials();
+    if (!googleCredentials.clientId || !googleCredentials.clientSecret) {
+      throw new ApiError(ERROR_CODES.INVALID_CONFIGURATION, 'Missing Google OAuth credentials', 400);
+    }
     const googleAuth = new google.auth.OAuth2(
-      this.deps.config.googleClientId,
-      this.deps.config.googleClientSecret,
+      googleCredentials.clientId,
+      googleCredentials.clientSecret,
       meta.returnUrl ?? this.deps.config.googleRedirectUri
     );
 

@@ -4,6 +4,30 @@ import request from 'supertest';
 import { createTestContext } from './helpers.js';
 
 describe('OAuth security and validation', () => {
+  it('reports environment OAuth configuration without returning its secret', async () => {
+    const response = await request(ctx.app)
+      .get('/api/settings/google-oauth')
+      .set('Authorization', `Bearer ${ctx.config.adminKey}`)
+      .expect(200);
+
+    expect(response.body).toEqual({
+      configured: true,
+      clientId: 'test-google-client-id',
+      hasClientSecret: true,
+      source: 'environment',
+      updatedAt: null
+    });
+    expect(JSON.stringify(response.body)).not.toContain('test-google-client-secret');
+  });
+
+  it('protects OAuth settings with administrator authentication', async () => {
+    await request(ctx.app).get('/api/settings/google-oauth').expect(401);
+    await request(ctx.app)
+      .patch('/api/settings/google-oauth')
+      .send({ clientId: 'unauthorized', clientSecret: 'must-not-store' })
+      .expect(401);
+  });
+
   let ctx: ReturnType<typeof createTestContext>;
 
   beforeEach(() => {
@@ -64,6 +88,58 @@ describe('OAuth security and validation', () => {
       .expect(400);
 
     expect(res.body.error.code).toBe('INVALID_CONFIGURATION');
+    ctxWithoutGoogle.cleanup();
+  });
+
+  it('stores Google OAuth credentials encrypted and never returns the client secret', async () => {
+    const ctxWithoutGoogle = createTestContext({
+      googleClientId: '',
+      googleClientSecret: ''
+    });
+    const clientSecret = 'google-client-secret-that-must-not-leak';
+
+    const initial = await request(ctxWithoutGoogle.app)
+      .get('/api/settings/google-oauth')
+      .set('Authorization', `Bearer ${ctxWithoutGoogle.config.adminKey}`)
+      .expect(200);
+    expect(initial.body).toEqual({
+      configured: false,
+      clientId: '',
+      hasClientSecret: false,
+      source: 'missing',
+      updatedAt: null
+    });
+
+    const configured = await request(ctxWithoutGoogle.app)
+      .patch('/api/settings/google-oauth')
+      .set('Authorization', `Bearer ${ctxWithoutGoogle.config.adminKey}`)
+      .send({ clientId: 'configured-client-id', clientSecret })
+      .expect(200);
+    expect(configured.body.configured).toBe(true);
+    expect(configured.body.clientId).toBe('configured-client-id');
+    expect(configured.body.hasClientSecret).toBe(true);
+    expect(configured.body.source).toBe('stored');
+    expect(JSON.stringify(configured.body)).not.toContain(clientSecret);
+
+    const stored = ctxWithoutGoogle.db.getProviderCredentials('google_oauth');
+    expect(stored).toBeDefined();
+    expect(JSON.stringify(stored)).not.toContain(clientSecret);
+
+    const connect = await request(ctxWithoutGoogle.app)
+      .post('/api/accounts/gmail/connect')
+      .set('Authorization', `Bearer ${ctxWithoutGoogle.config.adminKey}`)
+      .send({ returnUrl: 'http://127.0.0.1:6981/ok' })
+      .expect(200);
+    const authorizationUrl = new URL(connect.body.authorizationUrl);
+    expect(authorizationUrl.searchParams.get('client_id')).toBe('configured-client-id');
+
+    const updated = await request(ctxWithoutGoogle.app)
+      .patch('/api/settings/google-oauth')
+      .set('Authorization', `Bearer ${ctxWithoutGoogle.config.adminKey}`)
+      .send({ clientId: 'renamed-client-id' })
+      .expect(200);
+    expect(updated.body.clientId).toBe('renamed-client-id');
+    expect(JSON.stringify(updated.body)).not.toContain(clientSecret);
     ctxWithoutGoogle.cleanup();
   });
 

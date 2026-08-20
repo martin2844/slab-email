@@ -74,6 +74,15 @@ interface OAuthStateRow {
   meta_json: string;
 }
 
+interface ProviderCredentialRow {
+  provider: string;
+  public_identifier: string;
+  encrypted_payload: string;
+  iv: string;
+  auth_tag: string;
+  updated_at: string;
+}
+
 interface SendOperationRow {
   id: number;
   account_id: string;
@@ -177,6 +186,15 @@ export class DatabaseService {
         code_verifier TEXT NOT NULL,
         meta_json TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS provider_credentials (
+        provider TEXT PRIMARY KEY,
+        public_identifier TEXT NOT NULL,
+        encrypted_payload TEXT NOT NULL,
+        iv TEXT NOT NULL,
+        auth_tag TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
 
       this.db.exec(`
@@ -196,6 +214,9 @@ export class DatabaseService {
       this.db.prepare(
         'INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES (1, ?, ?)'
       ).run('initial_email_schema', nowIso());
+      this.db.prepare(
+        'INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES (2, ?, ?)'
+      ).run('provider_credentials', nowIso());
     });
     apply.immediate();
   }
@@ -209,8 +230,9 @@ export class DatabaseService {
           version: number;
         }>).map(({ version }) => version)
       : [];
-    const pending = applied.includes(1) ? [] : [1];
-    return { ready: pending.length === 0, expected: [1], applied, pending };
+    const expected = [1, 2];
+    const pending = expected.filter((version) => !applied.includes(version));
+    return { ready: pending.length === 0, expected, applied, pending };
   }
 
   ping(): void {
@@ -401,6 +423,74 @@ export class DatabaseService {
       encryptedPayload: row.encrypted_payload,
       iv: row.iv,
       authTag: row.auth_tag
+    };
+  }
+
+  setProviderCredentials(
+    provider: string,
+    publicIdentifier: string,
+    encryptedPayload: string,
+    iv: string,
+    authTag: string
+  ): void {
+    this.db
+      .prepare(
+        `
+        INSERT INTO provider_credentials (
+          provider,
+          public_identifier,
+          encrypted_payload,
+          iv,
+          auth_tag,
+          updated_at
+        )
+        VALUES (@provider, @publicIdentifier, @encryptedPayload, @iv, @authTag, @updatedAt)
+        ON CONFLICT(provider) DO UPDATE SET
+          public_identifier = excluded.public_identifier,
+          encrypted_payload = excluded.encrypted_payload,
+          iv = excluded.iv,
+          auth_tag = excluded.auth_tag,
+          updated_at = excluded.updated_at
+        `
+      )
+      .run({
+        provider,
+        publicIdentifier,
+        encryptedPayload,
+        iv,
+        authTag,
+        updatedAt: nowIso()
+      });
+  }
+
+  getProviderCredentials(provider: string):
+    | {
+        provider: string;
+        publicIdentifier: string;
+        encryptedPayload: string;
+        iv: string;
+        authTag: string;
+        updatedAt: string;
+      }
+    | undefined {
+    const row = this.db
+      .prepare(
+        `
+        SELECT provider, public_identifier, encrypted_payload, iv, auth_tag, updated_at
+        FROM provider_credentials
+        WHERE provider = ?
+        `
+      )
+      .get(provider) as ProviderCredentialRow | undefined;
+
+    if (!row) return undefined;
+    return {
+      provider: row.provider,
+      publicIdentifier: row.public_identifier,
+      encryptedPayload: row.encrypted_payload,
+      iv: row.iv,
+      authTag: row.auth_tag,
+      updatedAt: row.updated_at
     };
   }
 

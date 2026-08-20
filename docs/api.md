@@ -131,6 +131,33 @@ Starts OAuth flow and returns auth URL + state.
 }
 ```
 
+### `GET /api/settings/google-oauth`
+
+Returns admin-visible configuration metadata. It never returns the client
+secret.
+
+```json
+{
+  "configured": true,
+  "clientId": "example.apps.googleusercontent.com",
+  "hasClientSecret": true,
+  "source": "stored",
+  "updatedAt": "2026-08-20T18:00:00.000Z"
+}
+```
+
+### `PATCH /api/settings/google-oauth`
+
+Creates or rotates the encrypted Google OAuth configuration. Once configured,
+omit `clientSecret` to keep the stored value while updating the client ID.
+
+```json
+{
+  "clientId": "example.apps.googleusercontent.com",
+  "clientSecret": "write-only"
+}
+```
+
 ### `POST /api/access-profiles`
 
 Create access profile.

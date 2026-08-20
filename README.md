@@ -147,10 +147,11 @@ See [docs/proton.md](docs/proton.md).
 
 ## Gmail setup
 
-1. Create Google Cloud OAuth credentials.
-2. Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` in `.env`.
-3. Start service.
-4. Use:
+1. Create Google Cloud OAuth credentials for a Web application.
+2. Configure them from Slab Agents Settings (encrypted service storage), or set
+   `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` in `.env`.
+3. Register the exact Slab Agents callback URI shown in Settings.
+4. Start service and use:
    - `POST /api/accounts/gmail/connect` to obtain `authorizationUrl`.
 5. Complete OAuth in browser.
 6. Callback:

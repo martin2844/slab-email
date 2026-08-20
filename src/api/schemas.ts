@@ -100,6 +100,11 @@ export const gmailConnectSchema = z.object({
   returnUrl: z.string().trim().url().optional()
 });
 
+export const googleOauthSettingsSchema = z.object({
+  clientId: z.string().trim().min(1).max(512),
+  clientSecret: z.string().trim().min(1).max(4096).optional()
+});
+
 export const oauthCallbackSchema = z.object({
   code: z.string().trim().min(1),
   state: z.string().trim().min(1)

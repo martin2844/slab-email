@@ -17,6 +17,7 @@ import {
   createProtonBridgeAccountSchema,
   draftSchema,
   gmailConnectSchema,
+  googleOauthSettingsSchema,
   idempotentSendSchema,
   oauthCallbackSchema,
   parseLimit,
@@ -165,6 +166,19 @@ export const createApp = (ctx: AppContext): express.Express => {
   app.use('/api', oauthRouter);
 
   const adminRouter = express.Router();
+
+  adminRouter.get('/settings/google-oauth', adminAuth, (_req, res) => {
+    res.status(200).json(ctx.accountService.getGoogleOAuthSettings());
+  });
+
+  adminRouter.patch('/settings/google-oauth', adminAuth, (req, res, next) => {
+    try {
+      const payload = googleOauthSettingsSchema.parse(req.body ?? {});
+      res.status(200).json(ctx.accountService.saveGoogleOAuthSettings(payload));
+    } catch (error) {
+      next(error);
+    }
+  });
 
   adminRouter.get('/accounts/:id', adminAuth, (req: AuthenticatedRequest, res: Response) => {
     const accountId = safeParam(req.params as Record<string, string | string[]>, 'id');

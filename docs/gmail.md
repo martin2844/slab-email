@@ -4,11 +4,18 @@
 
 ## OAuth credentials
 
-Required Google credentials:
+Required Google credentials can be supplied either through the admin API or at
+process startup:
 
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
 - `GOOGLE_REDIRECT_URI` (default `http://127.0.0.1:6981/api/oauth/google/callback`)
+
+For a managed Slab installation, configure the OAuth client from Slab Agents
+Settings. Slab Agents sends the values once to the authenticated server-side
+admin API. `slab-email` encrypts the client secret with
+`SLAB_EMAIL_MASTER_KEY`; GET responses expose only `hasClientSecret` and never
+return the secret. Environment credentials remain a deployment fallback.
 
 Scopes used by default:
 
@@ -18,8 +25,10 @@ Scopes used by default:
 
 ## Connect flow
 
-1. Ensure env vars are set.
-2. Start service.
+1. Configure the OAuth client through Slab Agents, or ensure the environment
+   credentials are set before starting the service.
+2. Add the exact Slab Agents callback shown in Settings to the Google Cloud
+   OAuth client's authorized redirect URIs.
 3. Call:
 
 `POST /api/accounts/gmail/connect`
@@ -43,7 +52,9 @@ Body:
 
 ## What is stored
 
-Only config and encrypted token payload (`refreshToken`) are persisted.
+The OAuth client ID and encrypted client secret are stored in the service DB
+when configured through the admin API. Gmail account config and encrypted token
+payload (`refreshToken`) are persisted separately.
 Account email and display name are fetched from Google profile.
 
 ## Notes
