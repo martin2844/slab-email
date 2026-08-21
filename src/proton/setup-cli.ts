@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 
+import { hiddenInputLabel } from './setup-prompts.js';
+
 type SetupResult =
   | {
       state: 'challenge_required';
@@ -92,7 +94,10 @@ const main = async (): Promise<void> => {
     stdout.write('Login values are sent directly to Bridge and are never stored.\n\n');
     const emailAddress = (await readline.question('Proton email: ')).trim();
     const displayName = (await readline.question('Display name: ')).trim();
-    const password = await hiddenQuestion(readline, 'Proton password: ');
+    const password = await hiddenQuestion(
+      readline,
+      hiddenInputLabel('Proton password')
+    );
     let result = await request<SetupResult>('/api/proton-bridge/connect', {
       emailAddress,
       displayName,
@@ -107,8 +112,8 @@ const main = async (): Promise<void> => {
         await readline.question('Complete Proton verification, then press Enter.');
       } else {
         const label = result.challengeType === 'two_factor'
-          ? 'Two-factor code: '
-          : 'Mailbox password: ';
+          ? hiddenInputLabel('Two-factor code')
+          : hiddenInputLabel('Mailbox password');
         value = await hiddenQuestion(readline, label);
       }
       result = await request<SetupResult>('/api/proton-bridge/challenge', {
