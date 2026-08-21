@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 
-import { hiddenInputLabel } from './setup-prompts.js';
+import { hiddenInputLabel, withPausedInput } from './setup-prompts.js';
 
 type SetupResult =
   | {
@@ -56,13 +56,15 @@ const hiddenQuestion = (
 ): string => {
   if (!stdin.isTTY) throw new Error('A TTY is required for secret input.');
   stdout.write(label);
-  return execFileSync(
-    '/bin/sh',
-    [
-      '-c',
-      "trap 'stty echo </dev/tty' EXIT HUP INT TERM; stty -echo </dev/tty; IFS= read -r value </dev/tty; printf '\\n' >/dev/tty; printf '%s' \"$value\""
-    ],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }
+  return withPausedInput(_readline, () =>
+    execFileSync(
+      '/bin/sh',
+      [
+        '-c',
+        "trap 'stty echo </dev/tty' EXIT HUP INT TERM; stty -echo </dev/tty; IFS= read -r value </dev/tty; printf '\\n' >/dev/tty; printf '%s' \"$value\""
+      ],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }
+    )
   );
 };
 
