@@ -8,30 +8,45 @@ RUN npm ci
 COPY . .
 RUN npm run build && npm prune --omit=dev
 
-FROM debian:bookworm-slim AS proton-bridge
+FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS proton-bridge
 
-ARG TARGETARCH
 ARG PROTON_BRIDGE_VERSION=3.26.0
-ARG PROTON_BRIDGE_SHA256=c076872522ce2f0facd0e64764d7d588b3a1ed213ff3acd25386b51e8a1f02e8
 ARG PROTON_BRIDGE_SOURCE_SHA256=5b19c63989d4efa05d3b05044be4718e4854b879c57419c837d1aca179661939
 
-RUN mkdir -p /out \
-  && if [ "$TARGETARCH" = "amd64" ]; then \
-    apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
-    && curl --fail --location --proto '=https' --tlsv1.2 \
-      --output /tmp/proton-bridge.deb \
-      "https://github.com/ProtonMail/proton-bridge/releases/download/v${PROTON_BRIDGE_VERSION}/protonmail-bridge_${PROTON_BRIDGE_VERSION}-1_amd64.deb" \
-    && curl --fail --location --proto '=https' --tlsv1.2 \
-      --output /tmp/proton-bridge-source.tar.gz \
-      "https://github.com/ProtonMail/proton-bridge/archive/refs/tags/v${PROTON_BRIDGE_VERSION}.tar.gz" \
-    && printf '%s  %s\n' "$PROTON_BRIDGE_SHA256" /tmp/proton-bridge.deb | sha256sum --check --strict \
-    && printf '%s  %s\n' "$PROTON_BRIDGE_SOURCE_SHA256" /tmp/proton-bridge-source.tar.gz | sha256sum --check --strict \
-    && dpkg-deb --extract /tmp/proton-bridge.deb /tmp/proton-bridge \
-    && install -m 0755 /tmp/proton-bridge/usr/lib/protonmail/bridge/bridge /out/proton-bridge \
-    && install -m 0644 /tmp/proton-bridge/usr/share/doc/protonmail/bridge/LICENSE /out/PROTON-BRIDGE-LICENSE \
-    && install -m 0644 /tmp/proton-bridge-source.tar.gz /out/PROTON-BRIDGE-SOURCE.tar.gz; \
-  fi
+ENV PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    gcc \
+    libcbor-dev \
+    libfido2-dev \
+    libsecret-1-dev \
+    libssl-dev \
+  && rm -rf /var/lib/apt/lists/* \
+  && curl --fail --location --proto '=https' --tlsv1.2 \
+    --output /tmp/proton-bridge-source.tar.gz \
+    "https://github.com/ProtonMail/proton-bridge/archive/refs/tags/v${PROTON_BRIDGE_VERSION}.tar.gz" \
+  && printf '%s  %s\n' "$PROTON_BRIDGE_SOURCE_SHA256" /tmp/proton-bridge-source.tar.gz | sha256sum --check --strict \
+  && mkdir -p /src /out \
+  && tar --extract --gzip --strip-components=1 --directory=/src --file=/tmp/proton-bridge-source.tar.gz
+
+WORKDIR /src
+
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    cd /src/utils \
+  && ./credits.sh bridge \
+  && cd /src \
+  && CGO_ENABLED=1 CGO_LDFLAGS="-lfido2 -lcbor -lssl -lcrypto" \
+    go build \
+      -tags='' \
+      -ldflags="-X github.com/ProtonMail/proton-bridge/v3/internal/constants.Version=${PROTON_BRIDGE_VERSION} -X github.com/ProtonMail/proton-bridge/v3/internal/constants.Revision=slab-source-build -X github.com/ProtonMail/proton-bridge/v3/internal/constants.Tag=v${PROTON_BRIDGE_VERSION} -X github.com/ProtonMail/proton-bridge/v3/internal/constants.BuildEnv=prod" \
+      -o /out/proton-bridge \
+      ./cmd/Desktop-Bridge/ \
+  && install -m 0644 LICENSE /out/PROTON-BRIDGE-LICENSE \
+  && install -m 0644 /tmp/proton-bridge-source.tar.gz /out/PROTON-BRIDGE-SOURCE.tar.gz
 
 FROM node:22-slim AS runtime
 

@@ -26,16 +26,17 @@ password, or human-verification challenges with
 `DELETE /api/proton-bridge/accounts/:id` signs the account out of Bridge and
 removes its encrypted mailbox record.
 
-The official binary is downloaded from Proton's pinned GitHub release during
-the image build and verified with a fixed SHA-256 checksum. Its GPLv3 license is
-included at `/usr/local/libexec/PROTON-BRIDGE-LICENSE` in the image. The exact
-v3.26.0 corresponding source archive is included at
+The official source is downloaded from Proton's pinned GitHub release during
+the image build and verified with a fixed SHA-256 checksum. Bridge is compiled
+with a compatible patched Go toolchain. Its GPLv3 license is
+included at `/usr/local/libexec/PROTON-BRIDGE-LICENSE` in the image, and the
+exact v3.26.0 corresponding source archive is included at
 `/usr/local/libexec/PROTON-BRIDGE-SOURCE.tar.gz`.
 
 ## Limitations
 
-- Managed Bridge is available on amd64 only because Proton publishes an amd64
-  Linux package. Other architectures can use an externally managed Bridge or a
+- Managed Bridge is built for amd64 and arm64 with a compatible patched Go
+  toolchain. Other architectures can use an externally managed Bridge or a
   standard IMAP/SMTP account.
 - Proton Bridge requires a paid Proton plan.
 - FIDO-only interactive login is not automated. TOTP and Proton human

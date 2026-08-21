@@ -129,7 +129,7 @@ See `.env.example` for the minimum bootstrap.
 
 ## Proton Bridge setup
 
-The amd64 image includes the official Proton Mail Bridge headless backend and a
+The image includes the official Proton Mail Bridge headless backend and a
 private process controller. Connect an account from Slab Agents or the stack
 installer. The Proton password and second-factor values travel only through the
 admin request and private process pipes; they are never stored. `slab-email`
@@ -140,11 +140,10 @@ Manual/external Bridge remains supported through
 the same host/network. A Bridge on a laptop or Windows workstation is not
 reachable from a remote VPS unless that network path is explicitly provided.
 
-Managed Bridge requires a paid Proton plan and is currently packaged only for
-amd64, matching Proton's official Linux release. The arm64 image reports the
-managed provider as unavailable while retaining manual IMAP/SMTP support.
-The image preserves Proton Bridge's GPLv3 license and the exact corresponding
-v3.26.0 source archive beside the packaged binary.
+Managed Bridge requires a paid Proton plan. It is built for amd64 and arm64
+from Proton's verified v3.26.0 source archive with a compatible patched Go
+toolchain. The image preserves Proton Bridge's GPLv3 license and the exact
+corresponding source archive beside the binary.
 
 See [docs/proton.md](docs/proton.md).
 

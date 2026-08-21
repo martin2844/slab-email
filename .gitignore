@@ -16,8 +16,11 @@ logs
 # Coverage
 coverage
 
+# Python controller artifacts
+__pycache__/
+*.py[cod]
+
 # Editors
 .DS_Store
 .vscode
 .idea
-
