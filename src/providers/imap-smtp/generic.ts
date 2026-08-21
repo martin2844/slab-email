@@ -204,7 +204,7 @@ export class GenericImapSmtpProvider implements Provider {
     this.smtpMessageIdDomain = cfg.smtp.smtpMessageIdDomain || normalizeDomain(this.emailAddress);
   }
 
-  getProviderType(): 'proton_bridge' | 'imap_smtp' | 'gmail' {
+  getProviderType(): 'proton_bridge' | 'imap_smtp' {
     return 'imap_smtp';
   }
 

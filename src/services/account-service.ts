@@ -6,12 +6,16 @@ import {
   EmailAccountConfig,
   ImapSmtpAccountConfig,
   GmailAccountConfig,
-  OAuthMetaState
+  OAuthMetaState,
+  AgentMailAccountConfig,
+  ResendAccountConfig,
+  MicrosoftGraphAccountConfig,
 } from '../types/models.js';
 import { RuntimeConfig } from '../config/env.js';
 import { DatabaseService } from '../db/database.js';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { google } from 'googleapis';
+import { providerJson } from '../providers/http-json.js';
 
 const STATE_TTL_MS = 10 * 60 * 1000;
 
@@ -47,6 +51,22 @@ export interface ImapSmtpAccountInput {
   smtpMessageIdDomain?: string;
 }
 
+export interface AgentMailAccountInput {
+  emailAddress: string;
+  displayName: string;
+  inboxId: string;
+  apiKey: string;
+  baseUrl?: string;
+}
+
+export interface ResendAccountInput {
+  emailAddress: string;
+  displayName: string;
+  apiKey: string;
+  inboundEnabled?: boolean;
+  baseUrl?: string;
+}
+
 export interface UpdateAccountInput {
   displayName?: string;
   imapHost?: string;
@@ -58,11 +78,15 @@ export interface UpdateAccountInput {
   customCA?: string;
   customTls?: boolean;
   smtpMessageIdDomain?: string;
+  inboxId?: string;
+  baseUrl?: string;
+  inboundEnabled?: boolean;
 }
 
 export interface UpdateAccountSecrets {
   username?: string;
   password?: string;
+  apiKey?: string;
 }
 
 export interface GmailConnectOptions {
@@ -74,12 +98,19 @@ export interface GmailCallbackInput {
   code: string;
 }
 
+export type MicrosoftConnectOptions = GmailConnectOptions;
+export type MicrosoftCallbackInput = GmailCallbackInput;
+
 export interface GoogleOAuthSettings {
   configured: boolean;
   clientId: string;
   hasClientSecret: boolean;
   source: 'stored' | 'environment' | 'missing';
   updatedAt: string | null;
+}
+
+export interface MicrosoftOAuthSettings extends GoogleOAuthSettings {
+  tenant: string;
 }
 
 export interface AccountServiceDependencies {
@@ -186,8 +217,54 @@ export class AccountService {
     return this.getAccount(id);
   }
 
+  createAgentMailAccount(input: AgentMailAccountInput): AccountRecord {
+    const id = randomUUID();
+    const config: AgentMailAccountConfig = {
+      emailAddress: input.emailAddress,
+      displayName: input.displayName,
+      inboxId: input.inboxId,
+      baseUrl: (input.baseUrl || 'https://api.agentmail.to/v0').replace(/\/$/, ''),
+    };
+    this.deps.db.upsertEmailAccount({
+      id, provider: 'agentmail', emailAddress: input.emailAddress,
+      displayName: input.displayName, enabled: true, config,
+    });
+    this.storeEncryptedSecrets(id, { apiKey: input.apiKey });
+    return this.getAccount(id);
+  }
+
+  createResendAccount(input: ResendAccountInput): AccountRecord {
+    const id = randomUUID();
+    const config: ResendAccountConfig = {
+      emailAddress: input.emailAddress,
+      displayName: input.displayName,
+      baseUrl: (input.baseUrl || 'https://api.resend.com').replace(/\/$/, ''),
+      inboundEnabled: input.inboundEnabled ?? false,
+    };
+    this.deps.db.upsertEmailAccount({
+      id, provider: 'resend', emailAddress: input.emailAddress,
+      displayName: input.displayName, enabled: true, config,
+    });
+    this.storeEncryptedSecrets(id, { apiKey: input.apiKey });
+    return this.getAccount(id);
+  }
+
   updateAccount(accountId: string, input: UpdateAccountInput, secrets?: UpdateAccountSecrets): AccountRecord {
     const account = this.getAccount(accountId);
+
+    if (
+      (account.provider === 'agentmail' || account.provider === 'resend') &&
+      input.baseUrl &&
+      'baseUrl' in account.config &&
+      new URL(input.baseUrl).origin !== new URL(account.config.baseUrl).origin &&
+      !secrets?.apiKey
+    ) {
+      throw new ApiError(
+        ERROR_CODES.INVALID_INPUT,
+        'A new API key is required when changing the provider origin',
+        400
+      );
+    }
 
     const nextConfig: EmailAccountConfig = {
       ...(account.config as object),
@@ -205,11 +282,13 @@ export class AccountService {
       connectionAt: account.lastConnectionAt
     });
 
-    if (secrets?.username || secrets?.password) {
+    if (secrets?.username || secrets?.password || secrets?.apiKey) {
       const current = this.getDecryptedSecrets(accountId);
       this.storeEncryptedSecrets(accountId, {
         username: secrets.username ?? current.username,
-        password: secrets.password ?? current.password
+        password: secrets.password ?? current.password,
+        refreshToken: current.refreshToken,
+        apiKey: secrets.apiKey ?? current.apiKey,
       });
     }
 
@@ -279,19 +358,26 @@ export class AccountService {
       username?: string;
       password?: string;
       refreshToken?: string;
+      apiKey?: string;
     }>(secret);
 
-    const google =
-      account.provider === 'gmail'
-        ? this.resolveGoogleOAuthCredentials()
-        : {
-            clientId: this.deps.config.googleClientId,
-            clientSecret: this.deps.config.googleClientSecret
-          };
+    const google = account.provider === 'gmail'
+      ? this.resolveGoogleOAuthCredentials()
+      : { clientId: this.deps.config.googleClientId, clientSecret: this.deps.config.googleClientSecret };
+    const microsoft = account.provider === 'microsoft_graph'
+      ? this.resolveMicrosoftOAuthCredentials()
+      : {
+          clientId: this.deps.config.microsoftClientId,
+          clientSecret: this.deps.config.microsoftClientSecret,
+          tenant: this.deps.config.microsoftTenant,
+        };
     return createProvider(account, parsed, {
       ...this.deps.config,
       googleClientId: google.clientId,
-      googleClientSecret: google.clientSecret
+      googleClientSecret: google.clientSecret,
+      microsoftClientId: microsoft.clientId,
+      microsoftClientSecret: microsoft.clientSecret,
+      microsoftTenant: microsoft.tenant,
     });
   }
 
@@ -371,17 +457,59 @@ export class AccountService {
     };
   }
 
-  private getDecryptedSecrets(accountId: string): { username?: string; password?: string; refreshToken?: string } {
+  getMicrosoftOAuthSettings(): MicrosoftOAuthSettings {
+    const stored = this.deps.db.getProviderCredentials('microsoft_oauth');
+    if (stored) {
+      const value = safeJsonParse<{ clientSecret: string; tenant: string }>(this.deps.cryptoService.decrypt(stored));
+      return {
+        configured: true, clientId: stored.publicIdentifier, hasClientSecret: true,
+        source: 'stored', updatedAt: stored.updatedAt, tenant: value.tenant || 'common',
+      };
+    }
+    const configured = Boolean(this.deps.config.microsoftClientId && this.deps.config.microsoftClientSecret);
+    return {
+      configured, clientId: configured ? this.deps.config.microsoftClientId : '',
+      hasClientSecret: configured, source: configured ? 'environment' : 'missing',
+      updatedAt: null, tenant: this.deps.config.microsoftTenant || 'common',
+    };
+  }
+
+  saveMicrosoftOAuthSettings(input: { clientId: string; clientSecret?: string; tenant?: string }): MicrosoftOAuthSettings {
+    const existing = this.deps.db.getProviderCredentials('microsoft_oauth');
+    const current = existing
+      ? safeJsonParse<{ clientSecret: string; tenant: string }>(this.deps.cryptoService.decrypt(existing))
+      : undefined;
+    const clientSecret = input.clientSecret || current?.clientSecret;
+    if (!clientSecret) throw new ApiError(ERROR_CODES.INVALID_INPUT, 'Microsoft OAuth client secret is required', 400);
+    const encrypted = this.deps.cryptoService.encrypt(JSON.stringify({ clientSecret, tenant: input.tenant || current?.tenant || 'common' }));
+    this.deps.db.setProviderCredentials('microsoft_oauth', input.clientId, encrypted.encryptedPayload, encrypted.iv, encrypted.authTag);
+    return this.getMicrosoftOAuthSettings();
+  }
+
+  private resolveMicrosoftOAuthCredentials() {
+    const stored = this.deps.db.getProviderCredentials('microsoft_oauth');
+    if (stored) {
+      const value = safeJsonParse<{ clientSecret: string; tenant: string }>(this.deps.cryptoService.decrypt(stored));
+      return { clientId: stored.publicIdentifier, clientSecret: value.clientSecret, tenant: value.tenant || 'common' };
+    }
+    return {
+      clientId: this.deps.config.microsoftClientId,
+      clientSecret: this.deps.config.microsoftClientSecret,
+      tenant: this.deps.config.microsoftTenant || 'common',
+    };
+  }
+
+  private getDecryptedSecrets(accountId: string): { username?: string; password?: string; refreshToken?: string; apiKey?: string } {
     const row = this.deps.db.getEmailAccountSecret(accountId);
     if (!row) {
       throw new ApiError(ERROR_CODES.INVALID_CONFIGURATION, 'Account secrets missing', 500);
     }
-    return safeJsonParse<{ username?: string; password?: string; refreshToken?: string }>(
+    return safeJsonParse<{ username?: string; password?: string; refreshToken?: string; apiKey?: string }>(
       this.deps.cryptoService.decrypt(row)
     );
   }
 
-  private storeEncryptedSecrets(accountId: string, payload: { username?: string; password?: string; refreshToken?: string }): void {
+  private storeEncryptedSecrets(accountId: string, payload: { username?: string; password?: string; refreshToken?: string; apiKey?: string }): void {
     const encrypted = this.deps.cryptoService.encrypt(JSON.stringify(payload));
     this.deps.db.setEmailAccountSecret(accountId, encrypted.encryptedPayload, encrypted.iv, encrypted.authTag);
   }
@@ -501,6 +629,72 @@ export class AccountService {
       accountId: id,
       emailAddress
     };
+  }
+
+  createMicrosoftAuthorizationUrl(options: MicrosoftConnectOptions = {}) {
+    const credentials = this.resolveMicrosoftOAuthCredentials();
+    if (!credentials.clientId || !credentials.clientSecret) {
+      throw new ApiError(ERROR_CODES.INVALID_CONFIGURATION, 'Missing Microsoft OAuth credentials', 400);
+    }
+    const state = randomBytes(16).toString('hex');
+    const codeVerifier = generatePkceCodeVerifier();
+    const codeChallenge = generatePkceCodeChallenge(codeVerifier);
+    const redirectUri = options.returnUrl ?? this.deps.config.microsoftRedirectUri;
+    const authorize = new URL(`https://login.microsoftonline.com/${encodeURIComponent(credentials.tenant)}/oauth2/v2.0/authorize`);
+    authorize.search = new globalThis.URLSearchParams({
+      client_id: credentials.clientId,
+      response_type: 'code',
+      redirect_uri: redirectUri,
+      response_mode: 'query',
+      scope: 'offline_access openid profile email Mail.ReadWrite Mail.Send',
+      state,
+      code_challenge: codeChallenge,
+      code_challenge_method: 'S256',
+      prompt: 'select_account',
+    }).toString();
+    const requestedAt = Date.now();
+    const expiresAt = requestedAt + STATE_TTL_MS;
+    this.deps.db.createOauthState({
+      state, provider: 'microsoft_graph', requestedAt, expiresAt, codeVerifier,
+      meta: { provider: 'microsoft_graph', returnUrl: options.returnUrl },
+    });
+    return { authorizationUrl: authorize.toString(), state, expiresAt };
+  }
+
+  async completeMicrosoftConnection(params: MicrosoftCallbackInput): Promise<{ accountId: string; emailAddress: string }> {
+    const state = this.deps.db.consumeOauthState(params.state);
+    if (!state) throw new ApiError(ERROR_CODES.STATE_INVALID, 'invalid OAuth state', 400);
+    if (state.expiresAt < Date.now()) throw new ApiError(ERROR_CODES.STATE_EXPIRED, 'OAuth state expired', 400);
+    if (state.provider !== 'microsoft_graph') throw new ApiError(ERROR_CODES.INVALID_INPUT, 'state provider mismatch', 400);
+    const credentials = this.resolveMicrosoftOAuthCredentials();
+    const meta = state.meta as OAuthMetaState;
+    const redirectUri = meta.returnUrl ?? this.deps.config.microsoftRedirectUri;
+    const token = await providerJson<{ access_token: string; refresh_token?: string }>(
+      `https://login.microsoftonline.com/${encodeURIComponent(credentials.tenant)}/oauth2/v2.0/token`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new globalThis.URLSearchParams({
+          client_id: credentials.clientId, client_secret: credentials.clientSecret,
+          code: params.code, redirect_uri: redirectUri, grant_type: 'authorization_code',
+          code_verifier: state.codeVerifier,
+          scope: 'offline_access openid profile email Mail.ReadWrite Mail.Send',
+        }),
+      },
+    );
+    if (!token.refresh_token) throw new ApiError(ERROR_CODES.INVALID_CONFIGURATION, 'No refresh token returned by Microsoft', 400);
+    const me = await providerJson<{ displayName?: string; mail?: string; userPrincipalName?: string }>(
+      'https://graph.microsoft.com/v1.0/me?$select=displayName,mail,userPrincipalName',
+      { headers: { Authorization: `Bearer ${token.access_token}` } },
+    );
+    const emailAddress = me.mail || me.userPrincipalName;
+    if (!emailAddress) throw new ApiError(ERROR_CODES.INVALID_CONFIGURATION, 'Could not determine Microsoft account email', 400);
+    const id = randomUUID();
+    const displayName = me.displayName || emailAddress;
+    const config: MicrosoftGraphAccountConfig = { emailAddress, displayName, tenant: credentials.tenant };
+    this.deps.db.upsertEmailAccount({ id, provider: 'microsoft_graph', emailAddress, displayName, enabled: true, config });
+    this.storeEncryptedSecrets(id, { refreshToken: token.refresh_token });
+    return { accountId: id, emailAddress };
   }
 
   listRecentOauthStates(): { total: number } {

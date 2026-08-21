@@ -16,9 +16,12 @@ It provides:
 - Admin REST for account and access-profile management.
 - MCP server for LLM/tooling clients.
 - Provider-level adapters for:
-  - Proton via Proton Mail Bridge (mandatory).
+  - Proton via Proton Mail Bridge.
   - Generic IMAP/SMTP.
   - Gmail via OAuth2 + Gmail API.
+  - Microsoft 365 / Outlook via OAuth2 + Microsoft Graph.
+  - AgentMail agent-native inboxes.
+  - Resend transactional send and optional inbound reading.
 - Encrypted credential storage in SQLite.
 - Scoped connector tokens with per-profile capabilities.
 - Send idempotency and basic anti-loop rate limiting.
@@ -41,6 +44,9 @@ slab-agents (REST/MCP) -> slab-email
                                  + proton_bridge -> Proton Mail Bridge (local IMAP/SMTP)
                                  + imap_smtp    -> Any IMAP/SMTP
                                  + gmail        -> Gmail API (OAuth2)
+                                 + microsoft   -> Microsoft Graph (OAuth2)
+                                 + agentmail   -> AgentMail API
+                                 + resend      -> Resend API
 ```
 
 ## Features
@@ -48,7 +54,8 @@ slab-agents (REST/MCP) -> slab-email
 - Multi-account support:
   - connect and manage multiple accounts simultaneously.
 - Provider abstraction:
-  - Proton Bridge + IMAP/SMTP generic + Gmail.
+  - Human mailboxes: Proton Bridge, generic IMAP/SMTP, Gmail, Microsoft Graph.
+  - Agent/application mail: AgentMail and Resend.
 - Connector-scoped permissions:
   - read / draft / send.
 - Idempotent send/reply with `idempotencyKey`.
@@ -110,6 +117,11 @@ Required / relevant environment variables:
 - `GOOGLE_CLIENT_SECRET`
 - `GOOGLE_CLIENT_SECRET_FILE` (mounted-file alternative)
 - `GOOGLE_REDIRECT_URI` (default `http://127.0.0.1:6981/api/oauth/google/callback`)
+- `MICROSOFT_CLIENT_ID`
+- `MICROSOFT_CLIENT_SECRET`
+- `MICROSOFT_CLIENT_SECRET_FILE` (mounted-file alternative)
+- `MICROSOFT_REDIRECT_URI` (default `http://127.0.0.1:6981/api/oauth/microsoft/callback`)
+- `MICROSOFT_TENANT` (default `common`)
 - `MAX_SENDS_PER_ACCOUNT_PER_HOUR` (default `60`)
 - `MCP_ALLOWED_ORIGINS` (comma-separated)
 - `MCP_ALLOWED_ORIGINS_HOSTS` (comma-separated)
@@ -162,6 +174,22 @@ See [docs/proton.md](docs/proton.md).
 
 See [docs/gmail.md](docs/gmail.md).
 
+## Other providers
+
+- Microsoft 365 and Outlook use Microsoft Graph OAuth. Configure the client ID,
+  client secret, tenant (`common` supports personal and work accounts), and the
+  exact callback shown by Slab Agents.
+- AgentMail accepts an inbox ID and API key. It supports read, search, threads,
+  drafts, send, and reply through the normalized Email MCP tools.
+- Resend accepts a sender address and API key. It supports send and optional
+  inbound read/search. It deliberately reports drafts, replies, and threads as
+  unavailable instead of emulating capabilities the provider does not expose.
+- Generic IMAP/SMTP accepts provider app credentials and remains the universal
+  fallback for Fastmail, Zoho, Yahoo, iCloud, self-hosted mail, and compatible
+  providers.
+
+See [docs/providers.md](docs/providers.md).
+
 ## REST API
 
 - Base:
@@ -206,7 +234,7 @@ See [docs/mcp.md](docs/mcp.md) for tool payloads and usage.
 ## Data model
 
 - `email_accounts`: account metadata and provider config (without secrets).
-- `email_account_secrets`: encrypted payload (`username`, `password`, `refreshToken`).
+- `email_account_secrets`: encrypted payload (`username`, `password`, `refreshToken`, or `apiKey`).
 - `access_profiles` + `access_profile_accounts`.
 - `access_tokens`: hashed connector tokens.
 - `send_operations`: status + audit fields and `idempotency_key`.

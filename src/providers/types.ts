@@ -7,17 +7,18 @@ import {
   ReplyInput,
   SendInput,
   ConnectionStatus,
-  AccountCapabilities
+  AccountCapabilities,
+  ProviderType
 } from '../types/models.js';
 
 export interface ProviderConnectionConfig {
   emailAddress: string;
   displayName: string;
-  provider: 'proton_bridge' | 'imap_smtp' | 'gmail';
+  provider: ProviderType;
 }
 
 export interface Provider {
-  getProviderType(): 'proton_bridge' | 'imap_smtp' | 'gmail';
+  getProviderType(): ProviderType;
   getCapabilities(): AccountCapabilities;
   verifyConnection(): Promise<ConnectionStatus>;
   searchMessages(params: MessageSearchParams): Promise<{

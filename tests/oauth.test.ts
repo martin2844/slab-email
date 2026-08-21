@@ -154,4 +154,32 @@ describe('OAuth security and validation', () => {
     const authorizationUrl = new URL(response.body.authorizationUrl);
     expect(authorizationUrl.searchParams.get('redirect_uri')).toBe(callback);
   });
+
+  it('stores Microsoft OAuth credentials and builds a PKCE authorization URL', async () => {
+    const clientSecret = 'microsoft-client-secret-that-must-not-leak';
+    const configured = await request(ctx.app)
+      .patch('/api/settings/microsoft-oauth')
+      .set('Authorization', `Bearer ${ctx.config.adminKey}`)
+      .send({ clientId: 'microsoft-app-id', clientSecret, tenant: 'common' })
+      .expect(200);
+    expect(configured.body).toMatchObject({
+      configured: true,
+      clientId: 'microsoft-app-id',
+      tenant: 'common',
+      source: 'stored',
+    });
+    expect(configured.text).not.toContain(clientSecret);
+
+    const callback = 'http://127.0.0.1:3009/api/integrations/email/microsoft/callback';
+    const connect = await request(ctx.app)
+      .post('/api/accounts/microsoft/connect')
+      .set('Authorization', `Bearer ${ctx.config.adminKey}`)
+      .send({ returnUrl: callback })
+      .expect(200);
+    const authorizationUrl = new URL(connect.body.authorizationUrl);
+    expect(authorizationUrl.hostname).toBe('login.microsoftonline.com');
+    expect(authorizationUrl.searchParams.get('client_id')).toBe('microsoft-app-id');
+    expect(authorizationUrl.searchParams.get('redirect_uri')).toBe(callback);
+    expect(authorizationUrl.searchParams.get('code_challenge_method')).toBe('S256');
+  });
 });

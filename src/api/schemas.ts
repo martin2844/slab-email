@@ -45,6 +45,27 @@ export const createProtonBridgeAccountSchema = z.object({
 
 export const createImapSmtpAccountSchema = createProtonBridgeAccountSchema;
 
+const providerBaseUrl = z.string().trim().url().refine((value) => {
+  const url = new URL(value);
+  return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash;
+}, 'base URL must be HTTP(S) without credentials, query, or fragment');
+
+export const createAgentMailAccountSchema = z.object({
+  emailAddress: z.string().trim().email(),
+  displayName: z.string().trim().min(1).max(200),
+  inboxId: z.string().trim().min(1).max(320),
+  apiKey: z.string().trim().min(1).max(4096),
+  baseUrl: providerBaseUrl.optional(),
+});
+
+export const createResendAccountSchema = z.object({
+  emailAddress: z.string().trim().email(),
+  displayName: z.string().trim().min(1).max(200),
+  apiKey: z.string().trim().min(1).max(4096),
+  inboundEnabled: z.boolean().optional(),
+  baseUrl: providerBaseUrl.optional(),
+});
+
 export const managedProtonConnectSchema = z.object({
   emailAddress: z.string().trim().email().max(320),
   displayName: z.string().trim().min(1).max(200),
@@ -77,7 +98,11 @@ export const patchAccountSchema = z
     customTls: z.boolean().optional(),
     smtpMessageIdDomain: z.string().trim().min(1).optional(),
     username: z.string().trim().min(1).optional(),
-    password: z.string().trim().min(1).optional()
+    password: z.string().trim().min(1).optional(),
+    apiKey: z.string().trim().min(1).max(4096).optional(),
+    inboxId: z.string().trim().min(1).max(320).optional(),
+    baseUrl: providerBaseUrl.optional(),
+    inboundEnabled: z.boolean().optional()
   })
   .superRefine((value, ctx) => {
     const hasAnyUpdate = Object.values(value).some((entry) => entry !== undefined);
@@ -122,6 +147,12 @@ export const gmailConnectSchema = z.object({
 export const googleOauthSettingsSchema = z.object({
   clientId: z.string().trim().min(1).max(512),
   clientSecret: z.string().trim().min(1).max(4096).optional()
+});
+
+export const microsoftOauthSettingsSchema = z.object({
+  clientId: z.string().trim().min(1).max(512),
+  clientSecret: z.string().trim().min(1).max(4096).optional(),
+  tenant: z.string().trim().min(1).max(256).default('common'),
 });
 
 export const oauthCallbackSchema = z.object({

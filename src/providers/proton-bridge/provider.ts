@@ -10,7 +10,7 @@ export class ProtonBridgeProvider extends GenericImapSmtpProvider {
     super(connectionConfig);
   }
 
-  getProviderType(): 'proton_bridge' | 'imap_smtp' | 'gmail' {
+  getProviderType(): 'proton_bridge' {
     return 'proton_bridge';
   }
 

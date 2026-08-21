@@ -1,6 +1,12 @@
-export type ProviderType = 'proton_bridge' | 'imap_smtp' | 'gmail';
+export type ProviderType =
+  | 'proton_bridge'
+  | 'imap_smtp'
+  | 'gmail'
+  | 'microsoft_graph'
+  | 'agentmail'
+  | 'resend';
 
-export type ProviderConnectionType = 'imap_smtp' | 'gmail' | 'proton_bridge';
+export type ProviderConnectionType = ProviderType;
 
 export type OperationStatus = 'pending' | 'sent' | 'failed' | 'unknown';
 
@@ -134,12 +140,32 @@ export interface GmailAccountConfig extends AccountConfigCommon {
   threadingMode?: ThreadingMode;
 }
 
+export interface MicrosoftGraphAccountConfig extends AccountConfigCommon {
+  tenant: string;
+  threadingMode?: ThreadingMode;
+}
+
+export interface AgentMailAccountConfig extends AccountConfigCommon {
+  inboxId: string;
+  baseUrl: string;
+}
+
+export interface ResendAccountConfig extends AccountConfigCommon {
+  baseUrl: string;
+  inboundEnabled: boolean;
+}
+
 export interface OAuthMetaState {
   provider: ProviderType;
   returnUrl?: string;
 }
 
-export type EmailAccountConfig = ImapSmtpAccountConfig | GmailAccountConfig;
+export type EmailAccountConfig =
+  | ImapSmtpAccountConfig
+  | GmailAccountConfig
+  | MicrosoftGraphAccountConfig
+  | AgentMailAccountConfig
+  | ResendAccountConfig;
 
 export interface AccountRecord {
   id: string;

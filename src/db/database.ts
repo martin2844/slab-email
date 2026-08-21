@@ -49,6 +49,30 @@ const capabilityMap: Record<ProviderType, ProviderCapabilities> = {
     send: true,
     reply: true,
     threads: false
+  },
+  microsoft_graph: {
+    read: true,
+    search: true,
+    draft: true,
+    send: true,
+    reply: true,
+    threads: true
+  },
+  agentmail: {
+    read: true,
+    search: true,
+    draft: true,
+    send: true,
+    reply: true,
+    threads: true
+  },
+  resend: {
+    read: true,
+    search: true,
+    draft: false,
+    send: true,
+    reply: false,
+    threads: false
   }
 };
 
@@ -114,7 +138,7 @@ export class DatabaseService {
       this.db.exec(`
       CREATE TABLE IF NOT EXISTS email_accounts (
         id TEXT PRIMARY KEY,
-        provider TEXT NOT NULL CHECK(provider IN ('proton_bridge','imap_smtp','gmail')),
+        provider TEXT NOT NULL CHECK(provider IN ('proton_bridge','imap_smtp','gmail','microsoft_graph','agentmail','resend')),
         email_address TEXT NOT NULL,
         display_name TEXT NOT NULL,
         enabled INTEGER NOT NULL DEFAULT 1,
@@ -219,6 +243,55 @@ export class DatabaseService {
       ).run('provider_credentials', nowIso());
     });
     apply.immediate();
+    this.migrateProviderTypes();
+  }
+
+  private migrateProviderTypes(): void {
+    const applied = this.db
+      .prepare('SELECT 1 FROM schema_migrations WHERE version = 3')
+      .get();
+    if (applied) return;
+
+    const table = this.db
+      .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='email_accounts'")
+      .get() as { sql?: string } | undefined;
+    const alreadyExpanded = table?.sql?.includes("'microsoft_graph'") === true;
+
+    this.db.pragma('foreign_keys = OFF');
+    try {
+      const migration = this.db.transaction(() => {
+        if (!alreadyExpanded) {
+          this.db.exec(`
+            CREATE TABLE email_accounts_v3 (
+              id TEXT PRIMARY KEY,
+              provider TEXT NOT NULL CHECK(provider IN ('proton_bridge','imap_smtp','gmail','microsoft_graph','agentmail','resend')),
+              email_address TEXT NOT NULL,
+              display_name TEXT NOT NULL,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              config_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              last_connection_status TEXT,
+              last_connection_at TEXT
+            );
+            INSERT INTO email_accounts_v3
+              SELECT id, provider, email_address, display_name, enabled, config_json,
+                     created_at, updated_at, last_connection_status, last_connection_at
+              FROM email_accounts;
+            DROP TABLE email_accounts;
+            ALTER TABLE email_accounts_v3 RENAME TO email_accounts;
+          `);
+        }
+        this.db.prepare(
+          'INSERT INTO schema_migrations(version, name, applied_at) VALUES (3, ?, ?)'
+        ).run('extended_email_providers', nowIso());
+      });
+      migration.immediate();
+    } finally {
+      this.db.pragma('foreign_keys = ON');
+    }
+    const violations = this.db.pragma('foreign_key_check') as unknown[];
+    if (violations.length > 0) throw new Error('provider migration violated foreign keys');
   }
 
   getMigrationStatus(): { ready: boolean; expected: number[]; applied: number[]; pending: number[] } {
@@ -230,7 +303,7 @@ export class DatabaseService {
           version: number;
         }>).map(({ version }) => version)
       : [];
-    const expected = [1, 2];
+    const expected = [1, 2, 3];
     const pending = expected.filter((version) => !applied.includes(version));
     return { ready: pending.length === 0, expected, applied, pending };
   }
@@ -930,14 +1003,20 @@ export class DatabaseService {
   }
 
   private mapAccount(row: EmailAccountRow): AccountRecord {
+    const config = JSON.parse(row.config_json) as EmailAccountConfig;
+    const capabilities = { ...this.providerCapabilities(row.provider) };
+    if (row.provider === 'resend' && !('inboundEnabled' in config && config.inboundEnabled)) {
+      capabilities.read = false;
+      capabilities.search = false;
+    }
     return {
       id: row.id,
       provider: row.provider,
       emailAddress: row.email_address,
       displayName: row.display_name,
       enabled: Boolean(row.enabled),
-      config: JSON.parse(row.config_json) as EmailAccountConfig,
-      capabilities: this.providerCapabilities(row.provider),
+      config,
+      capabilities,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       lastConnectionStatus: row.last_connection_status,

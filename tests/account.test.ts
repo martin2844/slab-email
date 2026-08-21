@@ -110,6 +110,69 @@ describe('account service endpoints', () => {
     await request(ctx.app).get(`/api/accounts/${id}`).set(adminHeaders(ctx.config.adminKey)).expect(404);
   });
 
+  it('creates API mail providers without exposing API keys', async () => {
+    const agentMailKey = 'agentmail-secret-key';
+    const agentMail = await request(ctx.app)
+      .post('/api/accounts/agentmail')
+      .set(adminHeaders(ctx.config.adminKey))
+      .send({
+        emailAddress: 'sales@agentmail.to',
+        displayName: 'Sales inbox',
+        inboxId: 'sales@agentmail.to',
+        apiKey: agentMailKey,
+      })
+      .expect(201);
+    expect(agentMail.body).toMatchObject({ provider: 'agentmail' });
+    expect(agentMail.text).not.toContain(agentMailKey);
+
+    const resendKey = 're_secret_key';
+    const resend = await request(ctx.app)
+      .post('/api/accounts/resend')
+      .set(adminHeaders(ctx.config.adminKey))
+      .send({
+        emailAddress: 'agent@example.com',
+        displayName: 'Outbound agent',
+        apiKey: resendKey,
+        inboundEnabled: false,
+      })
+      .expect(201);
+    expect(resend.body).toMatchObject({
+      provider: 'resend',
+      capabilities: { read: false, search: false, send: true, draft: false },
+    });
+    expect(resend.text).not.toContain(resendKey);
+
+    const encrypted = ctx.db.getEmailAccountSecret(agentMail.body.id);
+    expect(encrypted).toBeDefined();
+    expect(JSON.stringify(encrypted)).not.toContain(agentMailKey);
+    expect(JSON.parse(ctx.cryptoService.decrypt(encrypted!))).toEqual({ apiKey: agentMailKey });
+  });
+
+  it('requires a replacement key when an API provider origin changes', async () => {
+    const account = await request(ctx.app)
+      .post('/api/accounts/agentmail')
+      .set(adminHeaders(ctx.config.adminKey))
+      .send({
+        emailAddress: 'sales@agentmail.to',
+        displayName: 'Sales inbox',
+        inboxId: 'sales@agentmail.to',
+        apiKey: 'original-key',
+      })
+      .expect(201);
+
+    await request(ctx.app)
+      .patch(`/api/accounts/${account.body.id}`)
+      .set(adminHeaders(ctx.config.adminKey))
+      .send({ baseUrl: 'https://other.example/v0' })
+      .expect(400);
+
+    await request(ctx.app)
+      .patch(`/api/accounts/${account.body.id}`)
+      .set(adminHeaders(ctx.config.adminKey))
+      .send({ baseUrl: 'https://other.example/v0', apiKey: 'replacement-key' })
+      .expect(200);
+  });
+
   it('validates test result endpoint uses provider verification', async () => {
     const account = await request(ctx.app)
       .post('/api/accounts/proton-bridge')

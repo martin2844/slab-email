@@ -1,14 +1,24 @@
 import { RuntimeConfig } from '../config/env.js';
-import { AccountRecord, ImapSmtpAccountConfig } from '../types/models.js';
+import {
+  AccountRecord,
+  AgentMailAccountConfig,
+  ImapSmtpAccountConfig,
+  MicrosoftGraphAccountConfig,
+  ResendAccountConfig,
+} from '../types/models.js';
+import { AgentMailProvider } from './agentmail/provider.js';
 import { GenericImapSmtpProvider } from './imap-smtp/generic.js';
 import type { GenericImapSmtpProviderConfig } from './imap-smtp/types.js';
 import { GmailProvider } from './gmail/provider.js';
 import { ProtonBridgeProvider } from './proton-bridge/provider.js';
+import { MicrosoftGraphProvider } from './microsoft-graph/provider.js';
+import { ResendProvider } from './resend/provider.js';
 
 export interface SecretBundle {
   username?: string;
   password?: string;
   refreshToken?: string;
+  apiKey?: string;
 }
 
 export const shouldTrustDockerDesktopBridge = (
@@ -77,6 +87,43 @@ export const createProvider = (account: AccountRecord, secret: SecretBundle, run
       clientSecret: runtimeConfig.googleClientSecret,
       redirectUri: runtimeConfig.googleRedirectUri,
       scopes: runtimeConfig.gmailScopes
+    });
+  }
+
+  if (account.provider === 'microsoft_graph') {
+    const cfg = account.config as MicrosoftGraphAccountConfig;
+    if (!secret.refreshToken) throw new Error('Missing Microsoft refresh token');
+    return new MicrosoftGraphProvider({
+      emailAddress: account.emailAddress,
+      displayName: account.displayName,
+      refreshToken: secret.refreshToken,
+      clientId: runtimeConfig.microsoftClientId,
+      clientSecret: runtimeConfig.microsoftClientSecret,
+      tenant: cfg.tenant || runtimeConfig.microsoftTenant,
+    });
+  }
+
+  if (account.provider === 'agentmail') {
+    const cfg = account.config as AgentMailAccountConfig;
+    if (!secret.apiKey) throw new Error('Missing AgentMail API key');
+    return new AgentMailProvider({
+      emailAddress: account.emailAddress,
+      displayName: account.displayName,
+      inboxId: cfg.inboxId,
+      baseUrl: cfg.baseUrl,
+      apiKey: secret.apiKey,
+    });
+  }
+
+  if (account.provider === 'resend') {
+    const cfg = account.config as ResendAccountConfig;
+    if (!secret.apiKey) throw new Error('Missing Resend API key');
+    return new ResendProvider({
+      emailAddress: account.emailAddress,
+      displayName: account.displayName,
+      baseUrl: cfg.baseUrl,
+      inboundEnabled: cfg.inboundEnabled,
+      apiKey: secret.apiKey,
     });
   }
 

@@ -86,12 +86,13 @@ describe('managed Proton Bridge module', () => {
   it('keeps a challenge server-side and completes two-factor login', async () => {
     ctx = createTestContext();
     const controller = new FakeController();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     controller.responses.push(
       {
         state: 'challenge_required',
         challengeId: 'challenge-1',
         challengeType: 'two_factor',
-        expiresAt: '2026-08-21T12:10:00.000Z'
+        expiresAt
       },
       {
         state: 'connected',
@@ -124,7 +125,7 @@ describe('managed Proton Bridge module', () => {
       state: 'challenge_required',
       challengeId: 'challenge-1',
       challengeType: 'two_factor',
-      expiresAt: '2026-08-21T12:10:00.000Z'
+      expiresAt
     });
 
     const completed = await bridge.continueLogin({

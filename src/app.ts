@@ -14,10 +14,13 @@ import { MailService } from './services/mail-service.js';
 import {
   accessProfileSchema,
   createImapSmtpAccountSchema,
+  createAgentMailAccountSchema,
+  createResendAccountSchema,
   createProtonBridgeAccountSchema,
   draftSchema,
   gmailConnectSchema,
   googleOauthSettingsSchema,
+  microsoftOauthSettingsSchema,
   managedProtonAbortSchema,
   managedProtonChallengeSchema,
   managedProtonConnectSchema,
@@ -168,6 +171,15 @@ export const createApp = (ctx: AppContext): express.Express => {
       next(error);
     }
   });
+  oauthRouter.get('/oauth/microsoft/callback', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const payload = oauthCallbackSchema.parse(normalizeQuery(req.query));
+      const result = await ctx.accountService.completeMicrosoftConnection(payload);
+      res.status(200).json({ ...result, created: true });
+    } catch (error) {
+      next(error);
+    }
+  });
   app.use('/api', oauthRouter);
 
   const adminRouter = express.Router();
@@ -262,6 +274,19 @@ export const createApp = (ctx: AppContext): express.Express => {
     }
   });
 
+  adminRouter.get('/settings/microsoft-oauth', adminAuth, (_req, res) => {
+    res.status(200).json(ctx.accountService.getMicrosoftOAuthSettings());
+  });
+
+  adminRouter.patch('/settings/microsoft-oauth', adminAuth, (req, res, next) => {
+    try {
+      const payload = microsoftOauthSettingsSchema.parse(req.body ?? {});
+      res.status(200).json(ctx.accountService.saveMicrosoftOAuthSettings(payload));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   adminRouter.get('/accounts/:id', adminAuth, (req: AuthenticatedRequest, res: Response) => {
     const accountId = safeParam(req.params as Record<string, string | string[]>, 'id');
     const account = ctx.accountService.getAccount(accountId);
@@ -288,19 +313,38 @@ export const createApp = (ctx: AppContext): express.Express => {
     }
   });
 
+  adminRouter.post('/accounts/agentmail', adminAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const account = ctx.accountService.createAgentMailAccount(createAgentMailAccountSchema.parse(req.body));
+      res.status(201).json(account);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  adminRouter.post('/accounts/resend', adminAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const account = ctx.accountService.createResendAccount(createResendAccountSchema.parse(req.body));
+      res.status(201).json(account);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   const updateAccount = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
       const parsed = patchAccountSchema.parse(req.body);
       const id = safeParam(req.params as Record<string, string | string[]>, 'id');
-      const { username, password, ...config } = parsed;
+      const { username, password, apiKey, ...config } = parsed;
 
       const account = ctx.accountService.updateAccount(
         id,
         config,
-        username || password
+        username || password || apiKey
           ? {
               username: username,
-              password: password
+              password: password,
+              apiKey,
             }
           : undefined
       );
@@ -352,6 +396,16 @@ export const createApp = (ctx: AppContext): express.Express => {
         expiresAt,
         stateExpiresAt: expiresAt
       });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  adminRouter.post('/accounts/microsoft/connect', adminAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const payload = gmailConnectSchema.parse(req.body ?? {});
+      const { authorizationUrl, state, expiresAt } = ctx.accountService.createMicrosoftAuthorizationUrl(payload);
+      res.status(200).json({ authorizationUrl, state, expiresAt, stateExpiresAt: expiresAt });
     } catch (error) {
       next(error);
     }

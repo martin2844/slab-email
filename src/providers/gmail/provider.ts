@@ -189,7 +189,7 @@ export class GmailProvider implements Provider {
     this.client.setCredentials({ refresh_token: config.refreshToken });
   }
 
-  getProviderType(): 'proton_bridge' | 'imap_smtp' | 'gmail' {
+  getProviderType(): 'gmail' {
     return 'gmail';
   }
 

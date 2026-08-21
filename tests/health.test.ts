@@ -12,7 +12,7 @@ describe('health contracts', () => {
       expect(ready.body).toMatchObject({
         status: 'ready',
         database: 'ok',
-        migrations: { ready: true, applied: [1, 2], pending: [] }
+        migrations: { ready: true, applied: [1, 2, 3], pending: [] }
       });
     } finally {
       context.cleanup();
