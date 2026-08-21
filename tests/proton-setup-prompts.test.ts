@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { hiddenInputLabel, withPausedInput } from '../src/proton/setup-prompts.js';
+import { hiddenInputLabel } from '../src/proton/setup-prompts.js';
+import { terminalQuestion } from '../src/proton/terminal-question.js';
 
 describe('Proton setup prompts', () => {
   it('makes hidden terminal input and submission explicit', () => {
@@ -9,35 +10,45 @@ describe('Proton setup prompts', () => {
     );
   });
 
-  it('pauses the active readline consumer while secret input owns the TTY', () => {
+  it('uses one terminal reader for visible and hidden questions', () => {
     const events: string[] = [];
-    const input = {
-      pause: () => events.push('pause'),
-      resume: () => events.push('resume')
+    const dependencies = {
+      isTTY: true,
+      execute: (script: string, label: string) => {
+        events.push(
+          `${script.includes('stty -echo') ? 'read:hidden' : 'read:visible'}:${label}`
+        );
+        return 'answer';
+      }
     };
 
-    const result = withPausedInput(input, () => {
-      events.push('read');
-      return 'secret';
-    });
-
-    expect(result).toBe('secret');
-    expect(events).toEqual(['pause', 'read', 'resume']);
+    expect(terminalQuestion('Email: ', false, dependencies)).toBe('answer');
+    expect(terminalQuestion('Password: ', true, dependencies)).toBe('answer');
+    expect(events).toEqual([
+      'read:visible:Email: ',
+      'read:hidden:Password: '
+    ]);
   });
 
-  it('resumes readline when hidden input fails', () => {
-    const events: string[] = [];
-    const input = {
-      pause: () => events.push('pause'),
-      resume: () => events.push('resume')
-    };
+  it('disables echo before rendering a hidden prompt', () => {
+    let script = '';
+    terminalQuestion('Password: ', true, {
+      isTTY: true,
+      execute: (value) => {
+        script = value;
+        return 'secret';
+      }
+    });
 
+    expect(script.indexOf('stty -echo')).toBeLessThan(script.indexOf("printf '%s'"));
+  });
+
+  it('rejects interactive questions without a TTY', () => {
     expect(() =>
-      withPausedInput(input, () => {
-        events.push('read');
-        throw new Error('read failed');
+      terminalQuestion('Password: ', true, {
+        isTTY: false,
+        execute: () => 'secret'
       })
-    ).toThrow('read failed');
-    expect(events).toEqual(['pause', 'read', 'resume']);
+    ).toThrow('A TTY is required');
   });
 });

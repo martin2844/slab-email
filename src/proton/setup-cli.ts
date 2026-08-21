@@ -1,10 +1,9 @@
 /* global AbortSignal, fetch */
-import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { createInterface } from 'node:readline/promises';
-import { stdin, stdout } from 'node:process';
+import { stdout } from 'node:process';
 
-import { hiddenInputLabel, withPausedInput } from './setup-prompts.js';
+import { hiddenInputLabel } from './setup-prompts.js';
+import { terminalQuestion } from './terminal-question.js';
 
 type SetupResult =
   | {
@@ -50,24 +49,6 @@ const request = async <T>(path: string, body?: unknown): Promise<T> => {
   return payload as T;
 };
 
-const hiddenQuestion = (
-  _readline: ReturnType<typeof createInterface>,
-  label: string
-): string => {
-  if (!stdin.isTTY) throw new Error('A TTY is required for secret input.');
-  stdout.write(label);
-  return withPausedInput(_readline, () =>
-    execFileSync(
-      '/bin/sh',
-      [
-        '-c',
-        "trap 'stty echo </dev/tty' EXIT HUP INT TERM; stty -echo </dev/tty; IFS= read -r value </dev/tty; printf '\\n' >/dev/tty; printf '%s' \"$value\""
-      ],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }
-    )
-  );
-};
-
 const main = async (): Promise<void> => {
   const status = await request<{
     available: boolean;
@@ -89,17 +70,13 @@ const main = async (): Promise<void> => {
     return;
   }
 
-  const readline = createInterface({ input: stdin, output: stdout });
   let challengeId: string | null = null;
   try {
     stdout.write(`\nManaged Proton Bridge ${status.version ? `v${status.version}` : ''}\n`);
     stdout.write('Login values are sent directly to Bridge and are never stored.\n\n');
-    const emailAddress = (await readline.question('Proton email: ')).trim();
-    const displayName = (await readline.question('Display name: ')).trim();
-    const password = await hiddenQuestion(
-      readline,
-      hiddenInputLabel('Proton password')
-    );
+    const emailAddress = terminalQuestion('Proton email: ').trim();
+    const displayName = terminalQuestion('Display name: ').trim();
+    const password = terminalQuestion(hiddenInputLabel('Proton password'), true);
     let result = await request<SetupResult>('/api/proton-bridge/connect', {
       emailAddress,
       displayName,
@@ -111,12 +88,12 @@ const main = async (): Promise<void> => {
       let value: string | undefined;
       if (result.challengeType === 'human_verification') {
         if (result.verificationUrl) stdout.write(`Open: ${result.verificationUrl}\n`);
-        await readline.question('Complete Proton verification, then press Enter.');
+        terminalQuestion('Complete Proton verification, then press Enter.');
       } else {
         const label = result.challengeType === 'two_factor'
           ? hiddenInputLabel('Two-factor code')
           : hiddenInputLabel('Mailbox password');
-        value = await hiddenQuestion(readline, label);
+        value = terminalQuestion(label, true);
       }
       result = await request<SetupResult>('/api/proton-bridge/challenge', {
         challengeId: result.challengeId,
@@ -130,7 +107,6 @@ const main = async (): Promise<void> => {
     if (challengeId) {
       await request('/api/proton-bridge/abort', { challengeId }).catch(() => undefined);
     }
-    readline.close();
   }
 };
 
