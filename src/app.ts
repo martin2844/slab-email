@@ -18,6 +18,9 @@ import {
   draftSchema,
   gmailConnectSchema,
   googleOauthSettingsSchema,
+  managedProtonAbortSchema,
+  managedProtonChallengeSchema,
+  managedProtonConnectSchema,
   idempotentSendSchema,
   oauthCallbackSchema,
   parseLimit,
@@ -30,6 +33,7 @@ import { ApiError, ApiErrorPayload, ERROR_CODES } from './types/errors.js';
 import { hashText } from './config/env.js';
 import { buildOriginMatcher, isOriginAllowed } from './utils/origin.js';
 import { createMcpServer, createMcpTools } from './mcp/server.js';
+import type { ManagedProtonBridge } from './services/proton-bridge-manager.js';
 
 export interface AppContext {
   config: RuntimeConfig;
@@ -38,6 +42,7 @@ export interface AppContext {
   accessProfileService: AccessProfileService;
   mailService: MailService;
   logger: Logger;
+  managedProtonBridge?: ManagedProtonBridge;
 }
 
 const toJsonError = (error: ApiError): Record<string, unknown> => ({
@@ -166,6 +171,83 @@ export const createApp = (ctx: AppContext): express.Express => {
   app.use('/api', oauthRouter);
 
   const adminRouter = express.Router();
+
+  adminRouter.get('/proton-bridge', adminAuth, async (_req, res) => {
+    if (!ctx.managedProtonBridge) {
+      res.status(200).json({
+        available: false,
+        version: null,
+        state: 'unavailable',
+        message: 'Managed Proton Bridge is not installed.',
+        accounts: []
+      });
+      return;
+    }
+    res.status(200).json(await ctx.managedProtonBridge.status());
+  });
+
+  adminRouter.post('/proton-bridge/connect', adminAuth, async (req, res, next) => {
+    try {
+      if (!ctx.managedProtonBridge) {
+        throw new ApiError(
+          ERROR_CODES.INVALID_CONFIGURATION,
+          'Managed Proton Bridge is not installed.',
+          409
+        );
+      }
+      const input = managedProtonConnectSchema.parse(req.body ?? {});
+      res.status(200).json(await ctx.managedProtonBridge.connect(input));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  adminRouter.post('/proton-bridge/challenge', adminAuth, async (req, res, next) => {
+    try {
+      if (!ctx.managedProtonBridge) {
+        throw new ApiError(
+          ERROR_CODES.INVALID_CONFIGURATION,
+          'Managed Proton Bridge is not installed.',
+          409
+        );
+      }
+      const input = managedProtonChallengeSchema.parse(req.body ?? {});
+      res.status(200).json(await ctx.managedProtonBridge.continueLogin(input));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  adminRouter.post('/proton-bridge/abort', adminAuth, async (req, res, next) => {
+    try {
+      if (!ctx.managedProtonBridge) {
+        res.status(204).send();
+        return;
+      }
+      const { challengeId } = managedProtonAbortSchema.parse(req.body ?? {});
+      await ctx.managedProtonBridge.abort(challengeId);
+      res.status(204).send();
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  adminRouter.delete('/proton-bridge/accounts/:id', adminAuth, async (req, res, next) => {
+    try {
+      if (!ctx.managedProtonBridge) {
+        throw new ApiError(
+          ERROR_CODES.INVALID_CONFIGURATION,
+          'Managed Proton Bridge is not installed.',
+          409
+        );
+      }
+      const accountId = safeParam(req.params as Record<string, string | string[]>, 'id');
+      await ctx.managedProtonBridge.disconnectAccount(accountId);
+      res.status(204).send();
+    } catch (error) {
+      next(error);
+    }
+  });
 
   adminRouter.get('/settings/google-oauth', adminAuth, (_req, res) => {
     res.status(200).json(ctx.accountService.getGoogleOAuthSettings());

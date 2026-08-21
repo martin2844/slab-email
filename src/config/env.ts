@@ -51,6 +51,14 @@ const envSchema = z.object({
     .trim()
     .default('https://www.googleapis.com/auth/gmail.send'),
   GMAIL_TOKEN_REFRESH_WINDOW_SECONDS: z.coerce.number().int().min(60).default(300),
+  PROTON_BRIDGE_BINARY: z.string().trim().default('/usr/local/libexec/proton-bridge'),
+  PROTON_BRIDGE_CONTROLLER_SCRIPT: z
+    .string()
+    .trim()
+    .default('/app/dist/proton/bridge_controller.py'),
+  PROTON_BRIDGE_DATA_PATH: z.string().trim().default('/data/proton-bridge'),
+  PROTON_BRIDGE_PYTHON: z.string().trim().default('/usr/bin/python3'),
+  PROTON_BRIDGE_VERSION: z.string().trim().default(''),
 });
 
 export interface RuntimeConfig {
@@ -72,6 +80,11 @@ export interface RuntimeConfig {
   smtpMessageIdDomain?: string;
   gmailScopes: string[];
   skipMigrations: boolean;
+  protonBridgeBinary: string;
+  protonBridgeControllerScript: string;
+  protonBridgeDataPath: string;
+  protonBridgePython: string;
+  protonBridgeVersion: string | null;
 }
 
 const readSecret = (
@@ -151,7 +164,12 @@ export const loadConfig = (
     allowInsecureLoopback: parsed.NODE_ENV_ALLOW_INSECURE_LOCAL,
     smtpMessageIdDomain: parsed.SMTP_MESSAGE_ID_DOMAIN || undefined,
     gmailScopes,
-    skipMigrations: parsed.SKIP_MIGRATIONS === 'true'
+    skipMigrations: parsed.SKIP_MIGRATIONS === 'true',
+    protonBridgeBinary: parsed.PROTON_BRIDGE_BINARY,
+    protonBridgeControllerScript: parsed.PROTON_BRIDGE_CONTROLLER_SCRIPT,
+    protonBridgeDataPath: parsed.PROTON_BRIDGE_DATA_PATH,
+    protonBridgePython: parsed.PROTON_BRIDGE_PYTHON,
+    protonBridgeVersion: parsed.PROTON_BRIDGE_VERSION || null
   };
 };
 

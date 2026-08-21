@@ -127,6 +127,7 @@ export interface ImapSmtpAccountConfig extends AccountConfigCommon {
   customCA?: string;
   customTls?: boolean;
   smtpMessageIdDomain?: string;
+  managedBridge?: boolean;
 }
 
 export interface GmailAccountConfig extends AccountConfigCommon {

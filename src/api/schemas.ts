@@ -45,6 +45,25 @@ export const createProtonBridgeAccountSchema = z.object({
 
 export const createImapSmtpAccountSchema = createProtonBridgeAccountSchema;
 
+export const managedProtonConnectSchema = z.object({
+  emailAddress: z.string().trim().email().max(320),
+  displayName: z.string().trim().min(1).max(200),
+  password: z.string().min(1).max(4096).refine((value) => !/[\r\n]/.test(value), {
+    message: 'password cannot contain line breaks'
+  })
+});
+
+export const managedProtonChallengeSchema = z.object({
+  challengeId: z.string().uuid(),
+  value: z.string().max(4096).refine((value) => !/[\r\n]/.test(value), {
+    message: 'challenge value cannot contain line breaks'
+  }).optional()
+});
+
+export const managedProtonAbortSchema = z.object({
+  challengeId: z.string().uuid()
+});
+
 export const patchAccountSchema = z
   .object({
     displayName: z.string().trim().min(1).optional(),

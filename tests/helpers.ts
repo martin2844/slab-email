@@ -12,6 +12,7 @@ import { Logger } from '../src/utils/logger.js';
 import { AccessProfileService } from '../src/services/access-profile-service.js';
 import { AccountService } from '../src/services/account-service.js';
 import { MailService } from '../src/services/mail-service.js';
+import type { ManagedProtonBridge } from '../src/services/proton-bridge-manager.js';
 
 export interface TestContext {
   config: RuntimeConfig & { databasePath: string };
@@ -22,11 +23,17 @@ export interface TestContext {
   mailService: MailService;
   cleanup: () => void;
   cryptoService: EncryptionService;
+  managedProtonBridge?: ManagedProtonBridge;
 }
 
 const mkDbDir = (): string => mkdtempSync(join(tmpdir(), 'slab-email-test-'));
 
-export const createTestContext = (overrides: Partial<RuntimeConfig> = {}): TestContext => {
+export const createTestContext = (
+  overrides: Partial<RuntimeConfig> = {},
+  options: {
+    managedProtonBridgeFactory?: (accountService: AccountService) => ManagedProtonBridge;
+  } = {}
+): TestContext => {
   const dbDir = mkDbDir();
   const dbPath = join(dbDir, 'state.db');
   const masterKey = randomBytes(32);
@@ -51,6 +58,11 @@ export const createTestContext = (overrides: Partial<RuntimeConfig> = {}): TestC
       'https://www.googleapis.com/auth/gmail.send'
     ],
     skipMigrations: false,
+    protonBridgeBinary: '/missing/proton-bridge',
+    protonBridgeControllerScript: '/missing/bridge_controller.py',
+    protonBridgeDataPath: join(dbDir, 'proton-bridge'),
+    protonBridgePython: '/usr/bin/python3',
+    protonBridgeVersion: null,
     ...overrides,
     databasePath: dbPath
   };
@@ -61,13 +73,15 @@ export const createTestContext = (overrides: Partial<RuntimeConfig> = {}): TestC
   const accountService = new AccountService({ db, cryptoService, config });
   const accessProfileService = new AccessProfileService(db);
   const mailService = new MailService(accountService, db, config);
+  const managedProtonBridge = options.managedProtonBridgeFactory?.(accountService);
   const app = createApp({
     config,
     db,
     accountService,
     accessProfileService,
     mailService,
-    logger
+    logger,
+    managedProtonBridge
   });
 
   const cleanup = () => {
@@ -91,6 +105,7 @@ export const createTestContext = (overrides: Partial<RuntimeConfig> = {}): TestC
     accountService,
     accessProfileService,
     mailService,
+    managedProtonBridge,
     cleanup
   };
 };

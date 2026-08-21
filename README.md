@@ -129,19 +129,22 @@ See `.env.example` for the minimum bootstrap.
 
 ## Proton Bridge setup
 
-1. Install **Proton Mail Bridge**.
-2. Add your Proton account in Bridge and copy generated IMAP/SMTP config.
-3. Configure `slab-email` with that config through:
-   - `POST /api/accounts/proton-bridge`
-4. Test:
-   - `POST /api/accounts/:id/test`
+The amd64 image includes the official Proton Mail Bridge headless backend and a
+private process controller. Connect an account from Slab Agents or the stack
+installer. The Proton password and second-factor values travel only through the
+admin request and private process pipes; they are never stored. `slab-email`
+stores only the generated Bridge mailbox credential encrypted at rest.
 
-This project intentionally does not implement Proton login automation. Use only Bridge-generated credentials.
+Manual/external Bridge remains supported through
+`POST /api/accounts/proton-bridge`. This is useful when Bridge already runs on
+the same host/network. A Bridge on a laptop or Windows workstation is not
+reachable from a remote VPS unless that network path is explicitly provided.
 
-Proton Bridge must be reachable from the host running `slab-email`. A Bridge on
-a laptop or Windows workstation is not reachable from a remote VPS. For a VPS
-deployment, run Bridge on that server through a separately maintained setup, or
-use Gmail/generic IMAP-SMTP whose provider endpoint is network-accessible.
+Managed Bridge requires a paid Proton plan and is currently packaged only for
+amd64, matching Proton's official Linux release. The arm64 image reports the
+managed provider as unavailable while retaining manual IMAP/SMTP support.
+The image preserves Proton Bridge's GPLv3 license and the exact corresponding
+v3.26.0 source archive beside the packaged binary.
 
 See [docs/proton.md](docs/proton.md).
 

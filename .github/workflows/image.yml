@@ -104,7 +104,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=Slab Email
             org.opencontainers.image.description=Scoped email connector and MCP server for Slab
-            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.licenses=MIT AND GPL-3.0-or-later
       - id: build
         uses: docker/build-push-action@v6
         with:

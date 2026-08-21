@@ -137,6 +137,37 @@ export class AccountService {
     return this.getAccount(id);
   }
 
+  upsertManagedProtonBridgeAccount(input: ProtonBridgeAccountInput): AccountRecord {
+    const existing = this.deps.db
+      .getEmailAccounts()
+      .find(
+        (account) =>
+          account.provider === 'proton_bridge' &&
+          account.emailAddress.toLowerCase() === input.emailAddress.toLowerCase() &&
+          (account.config as ImapSmtpAccountConfig).managedBridge === true
+      );
+    const id = existing?.id ?? randomUUID();
+    const config: ImapSmtpAccountConfig = {
+      ...this.parseConfigForImap(input),
+      managedBridge: true
+    };
+    this.deps.db.upsertEmailAccount({
+      id,
+      provider: 'proton_bridge',
+      emailAddress: input.emailAddress,
+      displayName: input.displayName,
+      enabled: true,
+      config,
+      connectionStatus: existing?.lastConnectionStatus ?? null,
+      connectionAt: existing?.lastConnectionAt ?? null
+    });
+    this.storeEncryptedSecrets(id, {
+      username: input.username,
+      password: input.password
+    });
+    return this.getAccount(id);
+  }
+
   createImapSmtpAccount(input: ImapSmtpAccountInput): AccountRecord {
     const id = randomUUID();
     const config = this.parseConfigForImap(input);
