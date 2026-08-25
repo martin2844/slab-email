@@ -27,6 +27,8 @@ PROMPT_RE = re.compile(r">>>\s*$", re.MULTILINE)
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+$")
 MAX_BUFFER = 1024 * 1024
 CHALLENGE_TTL_SECONDS = 10 * 60
+PROMPT_QUIET_SECONDS = 0.05
+PROMPT_SETTLE_LIMIT_SECONDS = 0.25
 
 
 class ControllerError(Exception):
@@ -478,6 +480,13 @@ class BridgeController:
             found = [(match, index) for match, index in matches if match]
             if found:
                 match, index = min(found, key=lambda item: item[0].start())
+                if patterns[index].pattern == PROMPT_RE.pattern:
+                    self._settle_prompt_redraws(deadline)
+                    clean = self._clean(self.buffer)
+                    prompts = list(PROMPT_RE.finditer(clean))
+                    if not prompts:
+                        continue
+                    match = prompts[-1]
                 output = clean[: match.end()]
                 # Preserve bytes already received after the matched prompt. Bridge
                 # commonly writes a success line and the next CLI prompt in one
@@ -502,6 +511,53 @@ class BridgeController:
             if not chunk:
                 raise ControllerError("BRIDGE_STOPPED", "Managed Proton Bridge stopped unexpectedly.")
             self.buffer = (self.buffer + chunk.decode("utf-8", errors="replace"))[-MAX_BUFFER:]
+
+    def _settle_prompt_redraws(self, request_deadline: float) -> None:
+        """Consume delayed ishell prompt redraws before the next command.
+
+        Bridge's CLI can repaint the same prompt shortly after it first becomes
+        visible. Leaving that second prompt in the PTY makes the next request
+        look complete before Bridge has processed it, shifting every later
+        response by one command.
+        """
+        if self.master_fd is None:
+            return
+        hard_deadline = min(
+            request_deadline,
+            time.monotonic() + PROMPT_SETTLE_LIMIT_SECONDS,
+        )
+        quiet_deadline = min(
+            hard_deadline,
+            time.monotonic() + PROMPT_QUIET_SECONDS,
+        )
+        while time.monotonic() < hard_deadline:
+            wait_for = min(quiet_deadline, hard_deadline) - time.monotonic()
+            if wait_for <= 0:
+                return
+            readable, _, _ = select.select([self.master_fd], [], [], wait_for)
+            if not readable:
+                return
+            try:
+                chunk = os.read(self.master_fd, 16_384)
+            except BlockingIOError:
+                continue
+            except OSError as error:
+                raise ControllerError(
+                    "BRIDGE_STOPPED",
+                    "Managed Proton Bridge stopped unexpectedly.",
+                ) from error
+            if not chunk:
+                raise ControllerError(
+                    "BRIDGE_STOPPED",
+                    "Managed Proton Bridge stopped unexpectedly.",
+                )
+            self.buffer = (
+                self.buffer + chunk.decode("utf-8", errors="replace")
+            )[-MAX_BUFFER:]
+            quiet_deadline = min(
+                hard_deadline,
+                time.monotonic() + PROMPT_QUIET_SECONDS,
+            )
 
     @staticmethod
     def _clean(value: str) -> str:

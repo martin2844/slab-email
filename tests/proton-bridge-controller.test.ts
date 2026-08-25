@@ -18,9 +18,15 @@ type Envelope = {
 const fakeBridge = `#!/usr/bin/env python3
 import getpass
 import sys
+import time
 
 def read_command():
     # Proton Bridge's ishell prompt is redrawn with terminal cursor controls.
+    # Emit two redraws to reproduce the real CLI leaving an idle prompt in the
+    # PTY after the controller has already matched the first one.
+    sys.stdout.write("\\r\\b\\r\\b\\r\\b\\r\\b>>>  \\b")
+    sys.stdout.flush()
+    time.sleep(0.02)
     sys.stdout.write("\\r\\b\\r\\b\\r\\b\\r\\b>>>  \\b")
     sys.stdout.flush()
     return input().strip()
