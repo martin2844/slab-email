@@ -184,11 +184,14 @@ export const draftSchema = z.object({
 });
 
 export const idempotentSendSchema = draftSchema.extend({
+  expectedFrom: z.string().trim().toLowerCase().email().optional(),
   idempotencyKey: z.string().trim().min(1)
 });
 
 export const replySchema = z.object({
   accountId: z.string().trim().min(1),
+  expectedFrom: z.string().trim().toLowerCase().email().optional(),
+  expectedSubject: z.string().trim().min(1).max(998).optional(),
   messageId: z.string().trim().min(1),
   to: emailAddressListSchema.optional(),
   cc: emailAddressListSchema.optional(),

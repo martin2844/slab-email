@@ -83,11 +83,14 @@ export interface DraftInput {
 }
 
 export interface SendInput extends DraftInput {
+  expectedFrom?: string;
   idempotencyKey: string;
 }
 
 export interface ReplyInput {
   accountId: string;
+  expectedFrom?: string;
+  expectedSubject?: string;
   messageId: string;
   to?: EmailAddress[];
   cc?: EmailAddress[];
@@ -134,6 +137,7 @@ export interface ImapSmtpAccountConfig extends AccountConfigCommon {
   customTls?: boolean;
   smtpMessageIdDomain?: string;
   managedBridge?: boolean;
+  managedBridgeLogin?: string;
 }
 
 export interface GmailAccountConfig extends AccountConfigCommon {

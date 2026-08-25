@@ -26,6 +26,7 @@ def read_command():
     return input().strip()
 
 accounts = []
+modes = {}
 while True:
     try:
         command = read_command()
@@ -38,7 +39,7 @@ while True:
         print("Automatic updates are disabled.")
     elif command == "list":
         for index, email in enumerate(accounts):
-            print(f"{index}: {email:<20} (connected      , combined       )")
+            print(f"{index}: {email:<20} (connected      , {modes.get(email, 'combined')}       )")
     elif command == "login":
         email = input("Username: ")
         getpass.getpass("Password: ")
@@ -49,23 +50,51 @@ while True:
         elif "+2fa" in email:
             input("Two factor code: ")
         accounts.append(email)
+        modes[email] = "combined"
         print(f"Account {email} was added successfully.")
+    elif command.startswith("change mode "):
+        index = int(command.split(" ")[-1])
+        email = accounts[index]
+        answer = input(f"Are you sure you want to change the mode for account {email}? yes/no: ")
+        if answer.lower().startswith("y"):
+            modes[email] = "split"
+            print(f"Address mode for account {email} changed to split")
+    elif command == "info":
+        for email in accounts:
+            addresses = [email, "clara@clasific.ar"] if modes.get(email) == "split" else [email]
+            for address in addresses:
+                print(f"Configuration for {address}")
+                print("IMAP Settings")
+                print("Address:   127.0.0.1")
+                print("IMAP port: 1143")
+                print(f"Username:  {address}")
+                print("Password:  generated-bridge-secret")
+                print("Security:  STARTTLS")
+                print("")
+                print("SMTP Settings")
+                print("Address:   127.0.0.1")
+                print("SMTP port: 1025")
+                print(f"Username:  {address}")
+                print("Password:  generated-bridge-secret")
+                print("Security:  STARTTLS")
     elif command.startswith("info "):
         email = command.split(" ", 1)[1]
-        print(f"Configuration for {email}")
-        print("IMAP Settings")
-        print("Address:   127.0.0.1")
-        print("IMAP port: 1143")
-        print(f"Username:  {email}")
-        print("Password:  generated-bridge-secret")
-        print("Security:  STARTTLS")
-        print("")
-        print("SMTP Settings")
-        print("Address:   127.0.0.1")
-        print("SMTP port: 1025")
-        print(f"Username:  {email}")
-        print("Password:  generated-bridge-secret")
-        print("Security:  STARTTLS")
+        addresses = [email, "clara@clasific.ar"] if modes.get(email) == "split" else [email]
+        for address in addresses:
+            print(f"Configuration for {address}")
+            print("IMAP Settings")
+            print("Address:   127.0.0.1")
+            print("IMAP port: 1143")
+            print(f"Username:  {address}")
+            print("Password:  generated-bridge-secret")
+            print("Security:  STARTTLS")
+            print("")
+            print("SMTP Settings")
+            print("Address:   127.0.0.1")
+            print("SMTP port: 1025")
+            print(f"Username:  {address}")
+            print("Password:  generated-bridge-secret")
+            print("Security:  STARTTLS")
     elif command.startswith("delete "):
         email = command.split(" ", 1)[1]
         answer = input(f"Are you sure you want to remove account {email}? yes/no: ")
@@ -91,32 +120,25 @@ describe('Proton Bridge private controller protocol', () => {
     const pass = join(bin, 'pass');
     await import('node:fs/promises').then(({ mkdir }) => mkdir(bin));
     writeFileSync(bridge, fakeBridge, { mode: 0o700 });
-    writeFileSync(
-      gpg,
-      '#!/bin/sh\ncase "$*" in *--list-secret-keys*) printf "fpr:::::::::TESTFINGERPRINT:\\n";; esac\nexit 0\n',
-      { mode: 0o700 }
-    );
+    writeFileSync(gpg, '#!/bin/sh\ncase "$*" in *--list-secret-keys*) printf "fpr:::::::::TESTFINGERPRINT:\\n";; esac\nexit 0\n', { mode: 0o700 });
     writeFileSync(pass, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
     chmodSync(bridge, 0o700);
 
-    const controller = spawn(
-      'python3',
-      [
-        resolve('src/proton/bridge_controller.py'),
-        '--bridge',
-        bridge,
-        '--data-dir',
-        join(directory, 'data')
-      ],
-      {
-        cwd: process.cwd(),
-        env: { PATH: `${bin}:${process.env.PATH ?? '/usr/bin:/bin'}`, LANG: 'C.UTF-8' },
-        stdio: ['pipe', 'pipe', 'pipe']
-      }
-    );
+    const controller = spawn('python3', [resolve('src/proton/bridge_controller.py'), '--bridge', bridge, '--data-dir', join(directory, 'data')], {
+      cwd: process.cwd(),
+      env: {
+        PATH: `${bin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+        LANG: 'C.UTF-8'
+      },
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
     children.push(controller);
     const next = lineReader(controller);
-    expect(await next('ready')).toMatchObject({ id: null, ok: true, event: 'ready' });
+    expect(await next('ready')).toMatchObject({
+      id: null,
+      ok: true,
+      event: 'ready'
+    });
 
     controller.stdin.write(
       `${JSON.stringify({
@@ -189,9 +211,32 @@ describe('Proton Bridge private controller protocol', () => {
     expect(verified).toMatchObject({
       id: 'challenge-2',
       ok: true,
-      result: { state: 'connected', mailbox: { emailAddress: 'owner+hv@example.com' } }
+      result: {
+        state: 'connected',
+        mailbox: { emailAddress: 'owner+hv@example.com' }
+      }
     });
     expect(JSON.stringify([verification, verified])).not.toContain('second-proton-secret');
+
+    controller.stdin.write(
+      `${JSON.stringify({
+        id: 'addresses-1',
+        action: 'addresses',
+        emailAddress: 'owner+2fa@example.com',
+        enableSplit: true
+      })}\n`
+    );
+    const addresses = await next('addresses');
+    expect(addresses).toMatchObject({
+      id: 'addresses-1',
+      ok: true,
+      result: {
+        state: 'addresses',
+        mode: 'split',
+        mailboxes: [{ emailAddress: 'owner+2fa@example.com' }, { emailAddress: 'clara@clasific.ar' }]
+      }
+    });
+    expect(JSON.stringify(addresses)).toContain('generated-bridge-secret');
   }, 20_000);
 
   it('makes concurrent callers wait for the same controller startup', async () => {
@@ -229,7 +274,9 @@ for line in sys.stdin:
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 30));
     expect(secondResolved).toBe(false);
     await Promise.all([first, second]);
-    await expect(controller.request('status')).resolves.toMatchObject({ state: 'ready' });
+    await expect(controller.request('status')).resolves.toMatchObject({
+      state: 'ready'
+    });
     await controller.stop();
   });
 });
@@ -254,10 +301,7 @@ function lineReader(child: ChildProcessWithoutNullStreams) {
         resolvePromise(existing);
         return;
       }
-      const timeout = setTimeout(
-        () => reject(new Error(`${label} timed out: ${stderr || 'no stderr'}`)),
-        10_000
-      );
+      const timeout = setTimeout(() => reject(new Error(`${label} timed out: ${stderr || 'no stderr'}`)), 10_000);
       waiters.push((value) => {
         clearTimeout(timeout);
         resolvePromise(value);

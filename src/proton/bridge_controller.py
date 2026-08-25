@@ -94,6 +94,8 @@ class BridgeController:
             return self._abort(request)
         if action == "remove":
             return self._remove(request)
+        if action == "addresses":
+            return self._addresses(request)
         raise ControllerError("INVALID_ACTION", "Unsupported Proton Bridge controller action.")
 
     def _prepare_environment(self) -> dict[str, str]:
@@ -292,6 +294,60 @@ class BridgeController:
             self._expect([PROMPT_RE], 30)
         return {"state": "removed", "emailAddress": email}
 
+    def _addresses(self, request: dict[str, Any]) -> dict[str, Any]:
+        if self.pending:
+            raise ControllerError("SETUP_IN_PROGRESS", "Account setup must finish before discovering addresses.")
+        email = self._safe_text(request.get("emailAddress"), "emailAddress", 320)
+        self._send_line("list")
+        output, _ = self._expect([PROMPT_RE], 15)
+        account = self._bridge_account(output, email)
+        if account is None:
+            raise ControllerError("ACCOUNT_NOT_FOUND", "Managed Proton account was not found in Bridge.")
+        if account.group("state").lower() != "connected":
+            raise ControllerError("PROVIDER_UNAVAILABLE", "Managed Proton account is not connected.")
+
+        mode = account.group("mode").lower()
+        if mode == "combined" and request.get("enableSplit") is True:
+            self._send_line(f"change mode {account.group('index')}")
+            _, confirmation = self._expect(
+                [re.compile(r"Are you sure you want to change the mode", re.IGNORECASE), PROMPT_RE],
+                30,
+            )
+            if confirmation == 0:
+                self._send_line("yes")
+                self._expect([PROMPT_RE], 120)
+            self._send_line("list")
+            refreshed, _ = self._expect([PROMPT_RE], 15)
+            account = self._bridge_account(refreshed, email)
+            if account is None or account.group("mode").lower() != "split":
+                raise ControllerError(
+                    "CONFIGURATION_UNAVAILABLE",
+                    "Bridge did not enable split-address mode.",
+                )
+            mode = account.group("mode").lower()
+
+        self._send_line(f"info {email}")
+        info, _ = self._expect([PROMPT_RE], 60)
+        mailboxes = self._parse_mailboxes(info)
+        if not mailboxes:
+            raise ControllerError(
+                "CONFIGURATION_UNAVAILABLE",
+                "Bridge sender addresses could not be read.",
+            )
+        return {"state": "addresses", "mode": mode, "mailboxes": mailboxes}
+
+    @staticmethod
+    def _bridge_account(output: str, email: str) -> re.Match[str] | None:
+        rows = re.finditer(
+            r"^\s*(?P<index>\d+):\s+(?P<email>\S+)\s+\((?P<state>connected|signed out|locked)\s*,\s*(?P<mode>combined|split)(?:\s+mode)?\s*\)",
+            output,
+            re.MULTILINE | re.IGNORECASE,
+        )
+        return next(
+            (row for row in rows if row.group("email").lower() == email.lower()),
+            None,
+        )
+
     def _advance_login(self, email: str) -> dict[str, Any]:
         patterns = [
             re.compile(r"Two factor code:\s*$", re.MULTILINE | re.IGNORECASE),
@@ -357,6 +413,19 @@ class BridgeController:
         self._send_line(f"info {email}")
         output, _ = self._expect([PROMPT_RE], 30)
         normalized = self._clean(output)
+        mailboxes = self._parse_mailboxes(normalized)
+        mailbox = next(
+            (entry for entry in mailboxes if entry["emailAddress"].lower() == email.lower()),
+            mailboxes[0] if len(mailboxes) == 1 else None,
+        )
+        if mailbox is None:
+            raise ControllerError(
+                "CONFIGURATION_UNAVAILABLE",
+                "Bridge connected the account but mailbox configuration could not be read.",
+            )
+        return mailbox
+
+    def _parse_mailboxes(self, output: str) -> list[dict[str, Any]]:
         pattern = re.compile(
             r"Configuration for\s+(?P<email>\S+).*?"
             r"IMAP Settings\s+Address:\s*(?P<imap_host>\S+)\s+"
@@ -367,23 +436,22 @@ class BridgeController:
             r"Password:\s*(?P<smtp_password>\S+)\s+Security:\s*(?P<smtp_security>\S+)",
             re.DOTALL | re.IGNORECASE,
         )
-        match = pattern.search(normalized)
-        if not match or match.group("imap_password") != match.group("smtp_password"):
-            raise ControllerError(
-                "CONFIGURATION_UNAVAILABLE",
-                "Bridge connected the account but mailbox configuration could not be read.",
-            )
-        return {
-            "emailAddress": match.group("email"),
-            "imapHost": match.group("imap_host"),
-            "imapPort": int(match.group("imap_port")),
-            "imapTlsMode": self._tls_mode(match.group("imap_security")),
-            "smtpHost": match.group("smtp_host"),
-            "smtpPort": int(match.group("smtp_port")),
-            "smtpTlsMode": self._tls_mode(match.group("smtp_security")),
-            "username": match.group("imap_user"),
-            "bridgePassword": match.group("imap_password"),
-        }
+        mailboxes = []
+        for match in pattern.finditer(self._clean(output)):
+            if match.group("imap_password") != match.group("smtp_password"):
+                continue
+            mailboxes.append({
+                "emailAddress": match.group("email"),
+                "imapHost": match.group("imap_host"),
+                "imapPort": int(match.group("imap_port")),
+                "imapTlsMode": self._tls_mode(match.group("imap_security")),
+                "smtpHost": match.group("smtp_host"),
+                "smtpPort": int(match.group("smtp_port")),
+                "smtpTlsMode": self._tls_mode(match.group("smtp_security")),
+                "username": match.group("imap_user"),
+                "bridgePassword": match.group("imap_password"),
+            })
+        return mailboxes
 
     @staticmethod
     def _tls_mode(value: str) -> str:

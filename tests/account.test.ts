@@ -110,6 +110,28 @@ describe('account service endpoints', () => {
     await request(ctx.app).get(`/api/accounts/${id}`).set(adminHeaders(ctx.config.adminKey)).expect(404);
   });
 
+  it('rejects generic deletion while an account is assigned', async () => {
+    const created = await request(ctx.app)
+      .post('/api/accounts/imap-smtp')
+      .set(adminHeaders(ctx.config.adminKey))
+      .send({ ...baseProtonPayload, emailAddress: 'assigned@example.com' })
+      .expect(201);
+    ctx.accessProfileService.create({
+      name: 'assigned-profile',
+      readEnabled: true,
+      draftEnabled: false,
+      sendEnabled: false,
+      accountIds: [created.body.id]
+    });
+
+    const removed = await request(ctx.app)
+      .delete(`/api/accounts/${created.body.id}`)
+      .set(adminHeaders(ctx.config.adminKey))
+      .expect(409);
+    expect(removed.body.error.code).toBe('ACCOUNT_IN_USE');
+    expect(ctx.accountService.getAccount(created.body.id)).toBeDefined();
+  });
+
   it('creates API mail providers without exposing API keys', async () => {
     const agentMailKey = 'agentmail-secret-key';
     const agentMail = await request(ctx.app)

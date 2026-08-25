@@ -12,6 +12,7 @@ import {
   EmailMessageCompact,
   EmailMessage
 } from '../types/models.js';
+import type { Provider } from '../providers/types.js';
 
 const PROVIDER_RATE_WINDOW_MS = 60 * 60 * 1000;
 
@@ -70,8 +71,22 @@ export class MailService {
     return account;
   }
 
+  private assertExpectedSender(
+    account: { emailAddress: string },
+    expectedFrom: string | undefined
+  ): void {
+    if (!expectedFrom) return;
+    const actualFrom = account.emailAddress.trim().toLowerCase();
+    if (expectedFrom.trim().toLowerCase() === actualFrom) return;
+    throw new ApiError(
+      ERROR_CODES.SENDER_IDENTITY_MISMATCH,
+      'The requested sender does not match the connected account identity.',
+      409,
+      { expectedFrom, actualFrom }
+    );
+  }
+
   listAccounts(req: AuthenticatedRequest) {
-    this.canRead(req);
     const profile = this.getProfile(req);
     const all = this.accountService.listAccounts();
     return all.filter((account) => profile.accountIds.includes(account.id));
@@ -147,16 +162,19 @@ export class MailService {
     req: AuthenticatedRequest,
     accountId: string,
     operation: 'send' | 'reply',
-    input: { idempotencyKey: string; action: () => Promise<{ status: 'sent' | 'failed' | 'unknown'; providerMessageId?: string; providerThreadId?: string | null; detail?: string }> }
+    input: {
+      idempotencyKey: string;
+      preflight?: (provider: Provider) => Promise<void>;
+      action: (provider: Provider) => Promise<{
+        status: 'sent' | 'failed' | 'unknown';
+        providerMessageId?: string;
+        providerThreadId?: string | null;
+        detail?: string;
+      }>;
+    }
   ): Promise<SendOperationResult> {
     this.canSend(req);
     const account = this.resolveAccountAccess(req, accountId);
-
-    const provider = await this.accountService.getProviderForAccount(account.id);
-    const capability = operation === 'send' ? provider.getCapabilities().send : provider.getCapabilities().reply;
-    if (!capability) {
-      throw new ApiError(ERROR_CODES.PERMISSION_DENIED, `${operation} not supported by provider`, 405);
-    }
 
     const currentWindowStart = Date.now() - PROVIDER_RATE_WINDOW_MS;
     const existing = this.db.getSendOperation(account.id, input.idempotencyKey);
@@ -181,6 +199,13 @@ export class MailService {
       }
       throw new ApiError(ERROR_CODES.IDEMPOTENCY_CONFLICT, 'operation already in progress', 409);
     }
+
+    const provider = await this.accountService.getProviderForAccount(account.id);
+    const capability = operation === 'send' ? provider.getCapabilities().send : provider.getCapabilities().reply;
+    if (!capability) {
+      throw new ApiError(ERROR_CODES.PERMISSION_DENIED, `${operation} not supported by provider`, 405);
+    }
+    await input.preflight?.(provider);
 
     const recent = this.db.countRecentSendAttempts(account.id, new Date(currentWindowStart).toISOString());
     if (recent >= this.config.maxSendsPerAccountPerHour) {
@@ -223,7 +248,7 @@ export class MailService {
     let result: SendOperationResult;
 
     try {
-      result = await input.action();
+      result = await input.action(provider);
     } catch (error) {
       this.db.markSendOperationStatus(pendingId, 'failed', undefined, undefined, String(error));
       throw error;
@@ -262,21 +287,53 @@ export class MailService {
   }
 
   async send(req: AuthenticatedRequest, input: SendInput): Promise<SendOperationResult> {
+    this.canSend(req);
     const account = this.resolveAccountAccess(req, input.accountId);
-    const provider = await this.accountService.getProviderForAccount(account.id);
+    this.assertExpectedSender(account, input.expectedFrom);
     return this.runIdempotentOperation(req, input.accountId, 'send', {
       idempotencyKey: input.idempotencyKey,
-      action: () => provider.sendMessage(input)
+      action: (provider) => provider.sendMessage(input)
     });
   }
 
   async reply(req: AuthenticatedRequest, input: ReplyInput): Promise<SendOperationResult> {
+    this.canSend(req);
     const token = input.idempotencyKey || randomUUID();
     const account = this.resolveAccountAccess(req, input.accountId);
-    const provider = await this.accountService.getProviderForAccount(account.id);
+    this.assertExpectedSender(account, input.expectedFrom);
     return this.runIdempotentOperation(req, input.accountId, 'reply', {
       idempotencyKey: token,
-      action: () => provider.replyToMessage({ ...input, idempotencyKey: token })
+      preflight: async (provider) => {
+        if (!input.expectedSubject) return;
+        const original = await provider.getMessage(account.id, input.messageId);
+        const originalSender = original.from.address.trim().toLowerCase();
+        const requestedRecipients = (input.to ?? []).map(({ address }) =>
+          address.trim().toLowerCase()
+        );
+        const actualSubject = /^re:/i.test(original.subject.trim())
+          ? original.subject.trim()
+          : `Re: ${original.subject.trim()}`;
+        if (
+          requestedRecipients.length !== 1 ||
+          requestedRecipients[0] !== originalSender ||
+          input.replyAll === true ||
+          (input.cc?.length ?? 0) > 0 ||
+          input.expectedSubject !== actualSubject
+        ) {
+          throw new ApiError(
+            ERROR_CODES.REPLY_PLAN_MISMATCH,
+            'The approved reply no longer matches the source message.',
+            409,
+            {
+              requestedTo: requestedRecipients,
+              actualTo: [originalSender],
+              requestedSubject: input.expectedSubject,
+              actualSubject
+            }
+          );
+        }
+      },
+      action: (provider) => provider.replyToMessage({ ...input, idempotencyKey: token })
     });
   }
 }

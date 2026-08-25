@@ -131,7 +131,7 @@ export class PythonProtonBridgeController implements ProtonBridgeController {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`Managed Proton Bridge ${action} request timed out.`));
-      }, this.options.requestTimeoutMs ?? 60_000);
+      }, this.options.requestTimeoutMs ?? (action === 'addresses' ? 180_000 : 60_000));
       timeout.unref();
       this.pending.set(id, { resolve, reject, timeout });
       child.stdin.write(`${JSON.stringify({ id, action, ...input })}\n`);

@@ -1,5 +1,5 @@
 import { ApiError, ERROR_CODES } from '../types/errors.js';
-import type { AccountRecord } from '../types/models.js';
+import type { AccountRecord, ImapSmtpAccountConfig } from '../types/models.js';
 import type { AccountService } from './account-service.js';
 
 export type ProtonBridgeChallengeType =
@@ -19,6 +19,12 @@ export type ProtonBridgeMailbox = {
   bridgePassword: string;
 };
 
+type ProtonBridgeDiscoveredAddresses = {
+  state: 'addresses';
+  mode: 'combined' | 'split';
+  mailboxes: ProtonBridgeMailbox[];
+};
+
 export type ProtonBridgeControllerResult =
   | {
       state: 'ready' | 'starting' | 'error';
@@ -33,6 +39,7 @@ export type ProtonBridgeControllerResult =
       verificationUrl?: string;
     }
   | { state: 'connected'; mailbox: ProtonBridgeMailbox }
+  | ProtonBridgeDiscoveredAddresses
   | { state: 'removed'; emailAddress: string }
   | { state: 'aborted' };
 
@@ -62,6 +69,11 @@ export type ManagedProtonSetupResult =
       verificationUrl?: string;
     }
   | { state: 'connected'; account: AccountRecord };
+
+export type ManagedProtonAddressSyncResult = {
+  mode: 'combined' | 'split';
+  accounts: AccountRecord[];
+};
 
 type ManagedProtonBridgeDependencies = {
   controller: ProtonBridgeController;
@@ -192,8 +204,135 @@ export class ManagedProtonBridge {
         409
       );
     }
-    await this.remove(account.emailAddress);
-    this.deps.accountService.deleteAccount(accountId);
+    const config = account.config as ImapSmtpAccountConfig;
+    const login = config.managedBridgeLogin ?? account.emailAddress;
+    const group = this.deps.accountService.listAccounts().filter((candidate) =>
+      candidate.provider === 'proton_bridge' &&
+      (candidate.config as ImapSmtpAccountConfig).managedBridge === true &&
+      ((candidate.config as ImapSmtpAccountConfig).managedBridgeLogin ?? candidate.emailAddress).toLowerCase() ===
+        login.toLowerCase()
+    );
+    const impacted =
+      account.emailAddress.toLowerCase() === login.toLowerCase()
+        ? group
+        : [account];
+    const assigned = impacted.filter(({ id }) =>
+      this.deps.accountService.isAccountAssigned(id)
+    );
+    if (assigned.length > 0) {
+      throw new ApiError(
+        ERROR_CODES.ACCOUNT_IN_USE,
+        'Remove every affected Proton sender from access profiles before deleting it.',
+        409,
+        { accounts: assigned.map(({ id, emailAddress }) => ({ id, emailAddress })) }
+      );
+    }
+    if (account.emailAddress.toLowerCase() !== login.toLowerCase()) {
+      this.deps.accountService.deleteAccount(accountId);
+      return;
+    }
+    await this.remove(login);
+    const assignedAfterRemoval = group.filter(({ id }) =>
+      this.deps.accountService.isAccountAssigned(id)
+    );
+    if (assignedAfterRemoval.length > 0) {
+      throw new ApiError(
+        ERROR_CODES.ACCOUNT_IN_USE,
+        'Proton Bridge signed out, but local sender records were preserved because an access profile changed during deletion. Remove the assignments, then delete or reconnect the account.',
+        409,
+        { accounts: assignedAfterRemoval.map(({ id, emailAddress }) => ({ id, emailAddress })) }
+      );
+    }
+    for (const candidate of group) {
+      this.deps.accountService.deleteAccount(candidate.id);
+    }
+  }
+
+  async syncAddresses(accountId: string): Promise<ManagedProtonAddressSyncResult> {
+    this.assertAvailable();
+    const account = this.deps.accountService.getAccount(accountId);
+    if (
+      account.provider !== 'proton_bridge' ||
+      (account.config as ImapSmtpAccountConfig).managedBridge !== true
+    ) {
+      throw new ApiError(
+        ERROR_CODES.INVALID_INPUT,
+        'Account is not managed by the embedded Proton Bridge.',
+        409
+      );
+    }
+    await this.ensureStarted();
+    const config = account.config as ImapSmtpAccountConfig;
+    const login = config.managedBridgeLogin ?? account.emailAddress;
+    const result = await this.callController('addresses', {
+      emailAddress: login,
+      enableSplit: true
+    });
+    if (result.state !== 'addresses') {
+      throw new ApiError(
+        ERROR_CODES.PROVIDER_UNAVAILABLE,
+        'Proton Bridge did not return sender addresses.',
+        502
+      );
+    }
+    const allAccounts = this.deps.accountService.listAccounts();
+    const existing = new Map(
+      allAccounts
+        .filter((candidate) =>
+          candidate.provider === 'proton_bridge' &&
+          (candidate.config as ImapSmtpAccountConfig).managedBridge === true &&
+          ((candidate.config as ImapSmtpAccountConfig).managedBridgeLogin ?? candidate.emailAddress).toLowerCase() ===
+            login.toLowerCase()
+        )
+        .map((candidate) => [candidate.emailAddress.toLowerCase(), candidate])
+    );
+    const returnedAddresses = new Set(
+      result.mailboxes.map(({ emailAddress }) => emailAddress.toLowerCase())
+    );
+    const stale = allAccounts.filter((candidate) =>
+      candidate.provider === 'proton_bridge' &&
+      (candidate.config as ImapSmtpAccountConfig).managedBridge === true &&
+      ((candidate.config as ImapSmtpAccountConfig).managedBridgeLogin ?? candidate.emailAddress).toLowerCase() ===
+        login.toLowerCase() &&
+      !returnedAddresses.has(candidate.emailAddress.toLowerCase())
+    );
+    const accounts = result.mailboxes.map((mailbox) => {
+      const previous = existing.get(mailbox.emailAddress.toLowerCase());
+      return this.deps.accountService.upsertManagedProtonBridgeAccount({
+        emailAddress: mailbox.emailAddress,
+        displayName: previous?.displayName ?? mailbox.emailAddress,
+        imapHost: mailbox.imapHost,
+        imapPort: mailbox.imapPort,
+        imapTlsMode: mailbox.imapTlsMode,
+        smtpHost: mailbox.smtpHost,
+        smtpPort: mailbox.smtpPort,
+        smtpTlsMode: mailbox.smtpTlsMode,
+        username: mailbox.username,
+        password: mailbox.bridgePassword,
+        customTls: true,
+        managedBridgeLogin: login
+      });
+    });
+    const assignedStale = stale.filter(({ id }) =>
+      this.deps.accountService.isAccountAssigned(id)
+    );
+    const assignedStaleIds = new Set(assignedStale.map(({ id }) => id));
+    for (const candidate of stale) {
+      if (assignedStaleIds.has(candidate.id)) {
+        this.deps.accountService.setEnabled(candidate.id, false);
+      } else {
+        this.deps.accountService.deleteAccount(candidate.id);
+      }
+    }
+    if (assignedStale.length > 0) {
+      throw new ApiError(
+        ERROR_CODES.ACCOUNT_IN_USE,
+        'A Proton sender removed upstream was disabled locally because it is still assigned to an access profile.',
+        409,
+        { accounts: assignedStale.map(({ id, emailAddress }) => ({ id, emailAddress })) }
+      );
+    }
+    return { mode: result.mode, accounts };
   }
 
   async startIfConfigured(): Promise<void> {
@@ -246,7 +385,8 @@ export class ManagedProtonBridge {
       smtpTlsMode: mailbox.smtpTlsMode,
       username: mailbox.username,
       password: mailbox.bridgePassword,
-      customTls: true
+      customTls: true,
+      managedBridgeLogin: setup.emailAddress
     });
     return { state: 'connected', account };
   }

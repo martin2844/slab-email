@@ -39,12 +39,20 @@ const textContent = (value: string): { type: 'text'; text: string }[] => [{ type
 
 const toolError = (error: unknown) => {
   const normalized = error instanceof ApiError ? `${error.code}: ${error.message}` : sanitizeError(error);
-  const detail = error instanceof ApiError && error.details ? JSON.stringify(error.details) : undefined;
+  const safeDetails =
+    error instanceof ApiError &&
+    (error.code === ERROR_CODES.SENDER_IDENTITY_MISMATCH ||
+      error.code === ERROR_CODES.REPLY_PLAN_MISMATCH ||
+      error.code === ERROR_CODES.SEND_OUTCOME_UNKNOWN)
+      ? error.details
+      : undefined;
+  const detail = safeDetails ? JSON.stringify(safeDetails) : undefined;
   return {
     content: textContent(detail ? `${normalized} ${detail}` : normalized),
     structuredContent: asStructuredContent({
       error: sanitizeError(error),
-      code: error instanceof ApiError ? error.code : ERROR_CODES.INTERNAL_ERROR
+      code: error instanceof ApiError ? error.code : ERROR_CODES.INTERNAL_ERROR,
+      ...(safeDetails ? { details: safeDetails } : {})
     })
   };
 };
@@ -112,18 +120,35 @@ const draftInputSchema = z.object({
   html: z.string().optional()
 });
 
-const sendInputSchema = draftInputSchema.extend({
+const agenticMessageSchema = z.object({
+  accountId: z.string().trim().min(1),
+  to: z.array(z.string().trim().email()).min(1),
+  cc: z.array(z.string().trim().email()).optional(),
+  bcc: z.array(z.string().trim().email()).optional(),
+  subject: z.string().trim().min(1).max(998),
+  text: z.string().trim().min(1).max(100_000)
+});
+
+const sendInputSchema = agenticMessageSchema.extend({
+  expectedFrom: z.string().trim().toLowerCase().email().describe(
+    'Exact sender address returned by the latest email_list_accounts call. The send is rejected if the account identity changed.'
+  ),
   idempotencyKey: z.string().trim().min(1)
 });
 
 const replyInputSchema = z.object({
   accountId: z.string().trim().min(1),
+  expectedFrom: z.string().trim().toLowerCase().email().describe(
+    'Exact sender address returned by the latest email_list_accounts call. The reply is rejected if the account identity changed.'
+  ),
   messageId: z.string().trim().min(1),
-  to: z.array(z.string().trim().email()).optional(),
-  cc: z.array(z.string().trim().email()).optional(),
-  text: z.string().trim().min(1),
-  html: z.string().optional(),
-  replyAll: z.boolean().optional(),
+  to: z.array(z.string().trim().email()).length(1).describe(
+    'Exact original sender returned by email_get_message. Replies are rejected if the source message no longer matches.'
+  ),
+  expectedSubject: z.string().trim().min(1).max(998).describe(
+    'Exact reply subject shown for approval, including the Re: prefix when needed.'
+  ),
+  text: z.string().trim().min(1).max(100_000),
   idempotencyKey: z.string().trim().min(1)
 });
 
@@ -136,7 +161,7 @@ export const createMcpTools = (
   const profile = req.authContext?.type === 'profile' ? req.authContext.profile : undefined;
   if (!profile) return;
 
-  if (profile.readEnabled)
+  if (profile.readEnabled || profile.draftEnabled || profile.sendEnabled)
     server.registerTool(
       'email_list_accounts',
       {
@@ -147,6 +172,11 @@ export const createMcpTools = (
         const accounts = mailService.listAccounts(req).map((account) => ({
           id: account.id,
           email: account.emailAddress,
+          displayName: account.displayName,
+          sendAs: {
+            email: account.emailAddress,
+            displayName: account.displayName
+          },
           provider: account.provider,
           capabilities: {
             read: account.capabilities.read,
@@ -276,7 +306,7 @@ export const createMcpTools = (
     server.registerTool(
       'email_send',
       {
-        description: 'Send email with required idempotencyKey',
+        description: 'Send email from the verified account identity. Pass expectedFrom from the latest email_list_accounts result and an idempotencyKey.',
         inputSchema: sendInputSchema,
         annotations: WRITE_TOOL
       },
@@ -288,12 +318,12 @@ export const createMcpTools = (
         try {
           const result = await mailService.send(req, {
             accountId: args.accountId,
+            expectedFrom: args.expectedFrom,
             to: parseAddressField(args.to),
             cc: ensureArray(args.cc)?.map((entry) => ({ address: entry })),
             bcc: ensureArray(args.bcc)?.map((entry) => ({ address: entry })),
             subject: args.subject,
             text: args.text,
-            html: args.html,
             idempotencyKey: args.idempotencyKey
           });
           return {
@@ -306,11 +336,11 @@ export const createMcpTools = (
       }
     );
 
-  if (profile.sendEnabled)
+  if (profile.readEnabled && profile.sendEnabled)
     server.registerTool(
       'email_reply',
       {
-        description: 'Reply to a message with required idempotencyKey',
+        description: 'Reply to one verified original sender. Pass expectedFrom from email_list_accounts, and to plus expectedSubject from the latest email_get_message read.',
         inputSchema: replyInputSchema,
         annotations: WRITE_TOOL
       },
@@ -322,12 +352,11 @@ export const createMcpTools = (
         try {
           const result = await mailService.reply(req, {
             accountId: args.accountId,
+            expectedFrom: args.expectedFrom,
+            expectedSubject: args.expectedSubject,
             messageId: args.messageId,
             to: ensureArray(args.to)?.map((entry) => ({ address: entry })),
-            cc: ensureArray(args.cc)?.map((entry) => ({ address: entry })),
             text: args.text,
-            html: args.html,
-            replyAll: args.replyAll,
             idempotencyKey: args.idempotencyKey
           });
           return {

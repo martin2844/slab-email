@@ -261,6 +261,22 @@ export const createApp = (ctx: AppContext): express.Express => {
     }
   });
 
+  adminRouter.post('/proton-bridge/accounts/:id/sync-addresses', adminAuth, async (req, res, next) => {
+    try {
+      if (!ctx.managedProtonBridge) {
+        throw new ApiError(
+          ERROR_CODES.INVALID_CONFIGURATION,
+          'Managed Proton Bridge is not installed.',
+          409
+        );
+      }
+      const accountId = safeParam(req.params as Record<string, string | string[]>, 'id');
+      res.status(200).json(await ctx.managedProtonBridge.syncAddresses(accountId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   adminRouter.get('/settings/google-oauth', adminAuth, (_req, res) => {
     res.status(200).json(ctx.accountService.getGoogleOAuthSettings());
   });
@@ -358,10 +374,30 @@ export const createApp = (ctx: AppContext): express.Express => {
   // Backwards-compatible alias for clients created before PATCH was exposed.
   adminRouter.post('/accounts/:id', adminAuth, updateAccount);
 
-  adminRouter.delete('/accounts/:id', adminAuth, (req: AuthenticatedRequest, res: Response) => {
-    const accountId = safeParam(req.params as Record<string, string | string[]>, 'id');
-    ctx.accountService.deleteAccount(accountId);
-    res.status(204).send();
+  adminRouter.delete('/accounts/:id', adminAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const accountId = safeParam(req.params as Record<string, string | string[]>, 'id');
+      const account = ctx.accountService.getAccount(accountId);
+      if (
+        account.provider === 'proton_bridge' &&
+        'managedBridge' in account.config &&
+        account.config.managedBridge === true
+      ) {
+        if (!ctx.managedProtonBridge) {
+          throw new ApiError(
+            ERROR_CODES.INVALID_CONFIGURATION,
+            'Managed Proton Bridge is not installed.',
+            409
+          );
+        }
+        await ctx.managedProtonBridge.disconnectAccount(accountId);
+      } else {
+        ctx.accountService.deleteAccount(accountId);
+      }
+      res.status(204).send();
+    } catch (error) {
+      next(error);
+    }
   });
 
   adminRouter.post('/accounts/:id/enable', adminAuth, (req: AuthenticatedRequest, res: Response) => {
@@ -545,6 +581,7 @@ export const createApp = (ctx: AppContext): express.Express => {
         subject: payload.subject,
         text: payload.text,
         html: payload.html,
+        expectedFrom: payload.expectedFrom,
         idempotencyKey: payload.idempotencyKey
       });
       res.status(200).json(result);
@@ -558,6 +595,8 @@ export const createApp = (ctx: AppContext): express.Express => {
       const payload = replySchema.parse(req.body);
       const result = await ctx.mailService.reply(req, {
         accountId: payload.accountId,
+        expectedFrom: payload.expectedFrom,
+        expectedSubject: payload.expectedSubject,
         messageId: payload.messageId,
         to: payload.to?.map((address) => ({ address, name: undefined })),
         cc: payload.cc?.map((address) => ({ address, name: undefined })),
@@ -598,7 +637,11 @@ export const createApp = (ctx: AppContext): express.Express => {
     const deniedCapability =
       (requestedTool === 'email_create_draft' && !profile?.draftEnabled) ||
       (['email_send', 'email_reply'].includes(requestedTool ?? '') && !profile?.sendEnabled) ||
-      (['email_list_accounts', 'email_search', 'email_get_message', 'email_list_threads'].includes(requestedTool ?? '') && !profile?.readEnabled);
+      (['email_search', 'email_get_message', 'email_list_threads'].includes(requestedTool ?? '') && !profile?.readEnabled) ||
+      (requestedTool === 'email_list_accounts' &&
+        !profile?.readEnabled &&
+        !profile?.draftEnabled &&
+        !profile?.sendEnabled);
     if (deniedCapability) {
       const payload = {
         jsonrpc: '2.0',

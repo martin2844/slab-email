@@ -168,7 +168,9 @@ export class AccountService {
     return this.getAccount(id);
   }
 
-  upsertManagedProtonBridgeAccount(input: ProtonBridgeAccountInput): AccountRecord {
+  upsertManagedProtonBridgeAccount(
+    input: ProtonBridgeAccountInput & { managedBridgeLogin?: string }
+  ): AccountRecord {
     const existing = this.deps.db
       .getEmailAccounts()
       .find(
@@ -180,14 +182,15 @@ export class AccountService {
     const id = existing?.id ?? randomUUID();
     const config: ImapSmtpAccountConfig = {
       ...this.parseConfigForImap(input),
-      managedBridge: true
+      managedBridge: true,
+      managedBridgeLogin: input.managedBridgeLogin ?? input.emailAddress
     };
     this.deps.db.upsertEmailAccount({
       id,
       provider: 'proton_bridge',
       emailAddress: input.emailAddress,
       displayName: input.displayName,
-      enabled: true,
+      enabled: existing?.enabled ?? true,
       config,
       connectionStatus: existing?.lastConnectionStatus ?? null,
       connectionAt: existing?.lastConnectionAt ?? null
@@ -297,7 +300,20 @@ export class AccountService {
 
   deleteAccount(accountId: string): void {
     this.getAccount(accountId);
+    if (this.isAccountAssigned(accountId)) {
+      throw new ApiError(
+        ERROR_CODES.ACCOUNT_IN_USE,
+        'Remove this account from every access profile before deleting it.',
+        409
+      );
+    }
     this.deps.db.removeEmailAccount(accountId);
+  }
+
+  isAccountAssigned(accountId: string): boolean {
+    return this.deps.db
+      .listProfiles()
+      .some((profile) => profile.accountIds.includes(accountId));
   }
 
   setEnabled(accountId: string, enabled: boolean): AccountRecord {
