@@ -24,6 +24,9 @@ from typing import Any
 
 ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 PROMPT_RE = re.compile(r">>>\s*$", re.MULTILINE)
+ALREADY_LOGGED_IN_RE = re.compile(
+    r"Cannot login:\s*the user is already logged in", re.IGNORECASE
+)
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+$")
 MAX_BUFFER = 1024 * 1024
 CHALLENGE_TTL_SECONDS = 10 * 60
@@ -44,6 +47,7 @@ class BridgeController:
         self.master_fd: int | None = None
         self.child_pid: int | None = None
         self.buffer = ""
+        self.pending_command: str | None = None
         self.pending: dict[str, Any] | None = None
         self.environment = self._prepare_environment()
 
@@ -82,6 +86,7 @@ class BridgeController:
         self.master_fd = None
         self.child_pid = None
         self.buffer = ""
+        self.pending_command = None
         self.pending = None
 
     def handle(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -209,7 +214,7 @@ class BridgeController:
         self._set_privacy_defaults()
 
     def _set_privacy_defaults(self) -> None:
-        self._send_line("telemetry disable")
+        self._send_command("telemetry disable")
         output, index = self._expect(
             [re.compile(r"Do you want to disable usage diagnostics collection", re.I), PROMPT_RE],
             15,
@@ -217,7 +222,7 @@ class BridgeController:
         if index == 0:
             self._send_line("yes")
             self._expect([PROMPT_RE], 15)
-        self._send_line("updates autoupdates disable")
+        self._send_command("updates autoupdates disable")
         _, index = self._expect(
             [re.compile(r"Are you sure you want to stop bridge from doing this", re.I), PROMPT_RE],
             15,
@@ -232,11 +237,11 @@ class BridgeController:
                 self._restart_bridge()
             else:
                 return {"state": "ready", "accounts": [], "message": "Account setup is waiting for input."}
-        self._send_line("list")
+        self._send_command("list")
         output, _ = self._expect([PROMPT_RE], 15)
         accounts = []
         for match in re.finditer(
-            r"^\s*\d+:\s+(\S+)\s+\((connected|signed out|locked)\s*,",
+            r"^\s*(?:>>>\s*)*\d+:\s+(\S+)\s+\((connected|signed out|locked)\s*,",
             output,
             re.MULTILINE | re.IGNORECASE,
         ):
@@ -250,7 +255,7 @@ class BridgeController:
         password = self._safe_text(request.get("password"), "password", 4096)
         if not EMAIL_RE.match(email):
             raise ControllerError("INVALID_INPUT", "A valid Proton email address is required.")
-        self._send_line("login")
+        self._send_command("login")
         self._expect([re.compile(r"Username:\s*$", re.MULTILINE)], 15)
         self._send_line(email)
         self._expect([re.compile(r"Password:\s*$", re.MULTILINE)], 15)
@@ -286,7 +291,7 @@ class BridgeController:
         email = self._safe_text(request.get("emailAddress"), "emailAddress", 320)
         if not EMAIL_RE.match(email):
             raise ControllerError("INVALID_INPUT", "A valid Proton email address is required.")
-        self._send_line(f"delete {email}")
+        self._send_command(f"delete {email}")
         _, index = self._expect(
             [re.compile(r"Are you sure you want to.*remove account", re.I), PROMPT_RE],
             15,
@@ -300,7 +305,7 @@ class BridgeController:
         if self.pending:
             raise ControllerError("SETUP_IN_PROGRESS", "Account setup must finish before discovering addresses.")
         email = self._safe_text(request.get("emailAddress"), "emailAddress", 320)
-        self._send_line("list")
+        self._send_command("list")
         output, _ = self._expect([PROMPT_RE], 15)
         account = self._bridge_account(output, email)
         if account is None:
@@ -310,7 +315,7 @@ class BridgeController:
 
         mode = account.group("mode").lower()
         if mode == "combined" and request.get("enableSplit") is True:
-            self._send_line(f"change mode {account.group('index')}")
+            self._send_command(f"change mode {account.group('index')}")
             _, confirmation = self._expect(
                 [re.compile(r"Are you sure you want to change the mode", re.IGNORECASE), PROMPT_RE],
                 30,
@@ -318,7 +323,7 @@ class BridgeController:
             if confirmation == 0:
                 self._send_line("yes")
                 self._expect([PROMPT_RE], 120)
-            self._send_line("list")
+            self._send_command("list")
             refreshed, _ = self._expect([PROMPT_RE], 15)
             account = self._bridge_account(refreshed, email)
             if account is None or account.group("mode").lower() != "split":
@@ -328,7 +333,7 @@ class BridgeController:
                 )
             mode = account.group("mode").lower()
 
-        self._send_line(f"info {email}")
+        self._send_command(f"info {email}")
         info, _ = self._expect([PROMPT_RE], 60)
         mailboxes = self._parse_mailboxes(info)
         if not mailboxes:
@@ -341,7 +346,7 @@ class BridgeController:
     @staticmethod
     def _bridge_account(output: str, email: str) -> re.Match[str] | None:
         rows = re.finditer(
-            r"^\s*(?P<index>\d+):\s+(?P<email>\S+)\s+\((?P<state>connected|signed out|locked)\s*,\s*(?P<mode>combined|split)(?:\s+mode)?\s*\)",
+            r"^\s*(?:>>>\s*)*(?P<index>\d+):\s+(?P<email>\S+)\s+\((?P<state>connected|signed out|locked)\s*,\s*(?P<mode>combined|split)(?:\s+mode)?\s*\)",
             output,
             re.MULTILINE | re.IGNORECASE,
         )
@@ -357,6 +362,7 @@ class BridgeController:
             re.compile(r"Human Verification requested\.", re.IGNORECASE),
             re.compile(r"Do you want to use a security key", re.IGNORECASE),
             re.compile(r"Account\s+\S+\s+was added successfully\.", re.IGNORECASE),
+            ALREADY_LOGGED_IN_RE,
             re.compile(r"Cannot login:", re.IGNORECASE),
             re.compile(r"Security key authentication required", re.IGNORECASE),
             PROMPT_RE,
@@ -385,7 +391,16 @@ class BridgeController:
             self._expect([PROMPT_RE], 30)
             self.pending = None
             return {"state": "connected", "mailbox": self._mailbox_info(email)}
-        if index in (5, 6):
+        if index == 5:
+            # Proton has authenticated the credentials and identified an
+            # account that this Bridge process already owns. Treat that as an
+            # idempotent connect and recover its generated mailbox settings;
+            # reporting AUTH_FAILED here is both false and prevents an
+            # existing Bridge account from being adopted by slab-email.
+            self._expect([PROMPT_RE], 15)
+            self.pending = None
+            return {"state": "connected", "mailbox": self._mailbox_info(email)}
+        if index in (6, 7):
             self._expect([PROMPT_RE], 15)
             raise ControllerError("AUTH_FAILED", "Proton rejected the account login.")
         raise ControllerError("AUTH_FAILED", "Proton Bridge login did not complete.")
@@ -412,7 +427,7 @@ class BridgeController:
         return result
 
     def _mailbox_info(self, email: str) -> dict[str, Any]:
-        self._send_line(f"info {email}")
+        self._send_command(f"info {email}")
         output, _ = self._expect([PROMPT_RE], 30)
         normalized = self._clean(output)
         mailboxes = self._parse_mailboxes(normalized)
@@ -472,10 +487,34 @@ class BridgeController:
             raise ControllerError("BRIDGE_STOPPED", "Managed Proton Bridge is not running.")
         os.write(self.master_fd, value.encode("utf-8") + b"\n")
 
+    def _send_command(self, value: str) -> None:
+        if self.pending_command is not None:
+            raise ControllerError(
+                "STATE_INVALID",
+                "Managed Proton Bridge is still waiting for its previous command.",
+            )
+        self.pending_command = value
+        self._send_line(value)
+
     def _expect(self, patterns: list[re.Pattern[str]], timeout: float) -> tuple[str, int]:
         deadline = time.monotonic() + timeout
         while True:
             clean = self._clean(self.buffer)
+            if self.pending_command is not None:
+                # The PTY echoes each top-level command. Do not accept a prompt
+                # as that command's response until its echo is observed: ishell
+                # can redraw an old idle prompt hundreds of milliseconds later,
+                # after the command was already written. Time-based draining
+                # cannot make that race deterministic.
+                command_echo = re.search(
+                    rf"(?:^|\n)(?:>>>[ \t]*)?{re.escape(self.pending_command)}[ \t]*\n",
+                    clean,
+                    re.MULTILINE,
+                )
+                if command_echo is not None:
+                    self.buffer = clean[command_echo.end() :]
+                    self.pending_command = None
+                    continue
             matches = [(pattern.search(clean), index) for index, pattern in enumerate(patterns)]
             found = [(match, index) for match, index in matches if match]
             if found:

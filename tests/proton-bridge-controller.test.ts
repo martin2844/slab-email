@@ -26,7 +26,7 @@ def read_command():
     # PTY after the controller has already matched the first one.
     sys.stdout.write("\\r\\b\\r\\b\\r\\b\\r\\b>>>  \\b")
     sys.stdout.flush()
-    time.sleep(0.02)
+    time.sleep(0.30)
     sys.stdout.write("\\r\\b\\r\\b\\r\\b\\r\\b>>>  \\b")
     sys.stdout.flush()
     return input().strip()
@@ -49,6 +49,9 @@ while True:
     elif command == "login":
         email = input("Username: ")
         getpass.getpass("Password: ")
+        if email in accounts:
+            print("Cannot login: the user is already logged in")
+            continue
         if "+hv" in email:
             print("Human Verification requested. Please open the URL below in a browser and press ENTER when the challenge has been completed.")
             print("https://verify.proton.me/challenge/test-token")
@@ -226,6 +229,42 @@ describe('Proton Bridge private controller protocol', () => {
 
     controller.stdin.write(
       `${JSON.stringify({
+        id: 'connect-existing',
+        action: 'connect',
+        emailAddress: 'owner+2fa@example.com',
+        password: 'another-valid-proton-secret'
+      })}\n`
+    );
+    const existing = await next('already connected');
+    expect(existing).toMatchObject({
+      id: 'connect-existing',
+      ok: true,
+      result: {
+        state: 'connected',
+        mailbox: {
+          emailAddress: 'owner+2fa@example.com',
+          bridgePassword: 'generated-bridge-secret'
+        }
+      }
+    });
+    expect(JSON.stringify(existing)).not.toContain('another-valid-proton-secret');
+
+    controller.stdin.write(`${JSON.stringify({ id: 'status-1', action: 'status' })}\n`);
+    const status = await next('connected status');
+    expect(status).toMatchObject({
+      id: 'status-1',
+      ok: true,
+      result: {
+        state: 'ready',
+        accounts: [
+          { emailAddress: 'owner+2fa@example.com', state: 'connected' },
+          { emailAddress: 'owner+hv@example.com', state: 'connected' }
+        ]
+      }
+    });
+
+    controller.stdin.write(
+      `${JSON.stringify({
         id: 'addresses-1',
         action: 'addresses',
         emailAddress: 'owner+2fa@example.com',
@@ -233,7 +272,7 @@ describe('Proton Bridge private controller protocol', () => {
       })}\n`
     );
     const addresses = await next('addresses');
-    expect(addresses).toMatchObject({
+    expect(addresses, JSON.stringify(addresses)).toMatchObject({
       id: 'addresses-1',
       ok: true,
       result: {
