@@ -241,7 +241,7 @@ class BridgeController:
         output, _ = self._expect([PROMPT_RE], 15)
         accounts = []
         for match in re.finditer(
-            r"^\s*(?:>>>\s*)*\d+:\s+(\S+)\s+\((connected|signed out|locked)\s*,",
+            r"^\s*(?:>>>\s*)*\d+\s*:\s+(\S+)\s+\((connected|signed out|locked)\s*,",
             output,
             re.MULTILINE | re.IGNORECASE,
         ):
@@ -345,15 +345,27 @@ class BridgeController:
 
     @staticmethod
     def _bridge_account(output: str, email: str) -> re.Match[str] | None:
-        rows = re.finditer(
-            r"^\s*(?:>>>\s*)*(?P<index>\d+):\s+(?P<email>\S+)\s+\((?P<state>connected|signed out|locked)\s*,\s*(?P<mode>combined|split)(?:\s+mode)?\s*\)",
+        rows = list(re.finditer(
+            r"^\s*(?:>>>\s*)*(?P<index>\d+)\s*:\s+(?P<email>\S+)\s+\((?P<state>connected|signed out|locked)\s*,\s*(?P<mode>combined|split)(?:\s+mode)?\s*\)",
             output,
             re.MULTILINE | re.IGNORECASE,
-        )
-        return next(
-            (row for row in rows if row.group("email").lower() == email.lower()),
+        ))
+        requested = email.lower()
+        requested_username = requested.split("@", 1)[0]
+        matched = next(
+            (row for row in rows if row.group("email").lower() == requested),
             None,
         )
+        username_matches = [
+            row for row in rows if row.group("email").lower() == requested_username
+        ]
+        if matched is None and len(username_matches) == 1:
+            matched = username_matches[0]
+        # Proton's list command renders the account login username, which can
+        # differ from every mailbox address (for example `clasificar` versus
+        # `clasificar@proton.me`). Its own `info` command also selects the sole
+        # account regardless of the supplied name, so mirror that behavior.
+        return matched or (rows[0] if len(rows) == 1 else None)
 
     def _advance_login(self, email: str) -> dict[str, Any]:
         patterns = [
@@ -500,6 +512,7 @@ class BridgeController:
         deadline = time.monotonic() + timeout
         while True:
             clean = self._clean(self.buffer)
+            found: list[tuple[re.Match[str], int]] = []
             if self.pending_command is not None:
                 # The PTY echoes each top-level command. Do not accept a prompt
                 # as that command's response until its echo is observed: ishell
@@ -515,8 +528,9 @@ class BridgeController:
                     self.buffer = clean[command_echo.end() :]
                     self.pending_command = None
                     continue
-            matches = [(pattern.search(clean), index) for index, pattern in enumerate(patterns)]
-            found = [(match, index) for match, index in matches if match]
+            else:
+                matches = [(pattern.search(clean), index) for index, pattern in enumerate(patterns)]
+                found = [(match, index) for match, index in matches if match]
             if found:
                 match, index = min(found, key=lambda item: item[0].start())
                 if patterns[index].pattern == PROMPT_RE.pattern:
@@ -603,7 +617,7 @@ class BridgeController:
         # ishell redraws its prompt with carriage returns and backspaces. Keep
         # those terminal cursor controls out of the protocol parser so the
         # real Bridge prompt is matched the same way as a plain-text prompt.
-        return ANSI_RE.sub("", value).replace("\r", "").replace("\x08", "")
+        return ANSI_RE.sub("", value).replace("\r", "\n").replace("\x08", "")
 
 
 def emit(payload: dict[str, Any]) -> None:

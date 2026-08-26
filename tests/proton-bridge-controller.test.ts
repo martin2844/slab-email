@@ -45,7 +45,7 @@ while True:
         print("Automatic updates are disabled.")
     elif command == "list":
         for index, email in enumerate(accounts):
-            print(f"{index}: {email:<20} (connected      , {modes.get(email, 'combined')}       )")
+            print(f"{index} : {email:<20} (connected      , {modes.get(email, 'combined')}       )")
     elif command == "login":
         email = input("Username: ")
         getpass.getpass("Password: ")
