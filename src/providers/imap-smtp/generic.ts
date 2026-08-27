@@ -29,6 +29,121 @@ const SEARCH_DEFAULT_LIMIT = 20;
 const SEARCH_MAX_LIMIT = 100;
 const SNIPPET_MAX = 340;
 
+export const formatImapMessageId = (
+  uidValidity: bigint | string,
+  uid: number,
+  connectionFingerprint?: string
+): string => connectionFingerprint
+  ? `${connectionFingerprint}:${uidValidity}:${uid}`
+  : `${uidValidity}:${uid}`;
+
+export const parseImapMessageId = (
+  value: string
+): { uid: number; uidValidity?: string; connectionFingerprint?: string } => {
+  const current = value.match(/^([a-f0-9]{24}):(\d+):(\d+)$/);
+  const legacyQualified = value.match(/^(\d+):(\d+)$/);
+  const legacyBare = value.match(/^(\d+)$/);
+  const uid = Number.parseInt(
+    current?.[3] ?? legacyQualified?.[2] ?? legacyBare?.[1] ?? '',
+    10
+  );
+  if (!Number.isFinite(uid) || uid <= 0) {
+    throw new Error('invalid message id');
+  }
+  return {
+    uid,
+    uidValidity: current?.[2] ?? legacyQualified?.[1],
+    connectionFingerprint: current?.[1]
+  };
+};
+
+export const formatImapConnectionFingerprint = (input: {
+  host: string;
+  port: number;
+  username: string;
+}): string => {
+  const connection = [
+    input.host.trim().toLowerCase(),
+    String(input.port),
+    input.username.trim(),
+    'INBOX'
+  ].join('\n');
+  return crypto
+    .createHash('sha256')
+    .update(connection)
+    .digest('hex')
+    .slice(0, 24);
+};
+
+export const formatImapIdentityEpoch = (input: {
+  host: string;
+  port: number;
+  username: string;
+  uidValidity: bigint | string;
+}): string =>
+  `imap:${formatImapConnectionFingerprint(input)}:uidvalidity:${input.uidValidity}`;
+
+export const assertImapMessageIdentity = (
+  expected: ReturnType<typeof parseImapMessageId>,
+  current: { uidValidity: string; connectionFingerprint: string }
+): void => {
+  if (
+    (expected.connectionFingerprint &&
+      expected.connectionFingerprint !== current.connectionFingerprint) ||
+    (expected.uidValidity && expected.uidValidity !== current.uidValidity)
+  ) {
+    throw new Error('message not found');
+  }
+};
+
+const formatImapSearchCursor = (input: {
+  uidValidity: string;
+  connectionFingerprint: string;
+  beforeUid: number;
+}): string =>
+  `${input.connectionFingerprint}:${input.uidValidity}:before:${input.beforeUid}`;
+
+export const paginateImapUids = (input: {
+  messageIds: number[];
+  cursor?: string;
+  limit: number;
+  uidValidity: string;
+  connectionFingerprint: string;
+}): { uids: number[]; nextCursor?: string } => {
+  const parsedCursor = input.cursor?.match(
+    /^([a-f0-9]{24}):(\d+):before:(\d+)$/
+  );
+  if (input.cursor && !parsedCursor) throw new Error('invalid IMAP cursor');
+  if (
+    parsedCursor &&
+    (parsedCursor[1] !== input.connectionFingerprint ||
+      parsedCursor[2] !== input.uidValidity)
+  ) {
+    throw new Error('IMAP cursor mailbox changed');
+  }
+  const beforeUid = parsedCursor
+    ? Number.parseInt(parsedCursor[3]!, 10)
+    : undefined;
+  if (beforeUid !== undefined && (!Number.isFinite(beforeUid) || beforeUid <= 0)) {
+    throw new Error('invalid IMAP cursor');
+  }
+  const eligible = [...new Set(input.messageIds)]
+    .filter((uid) => beforeUid === undefined || uid < beforeUid)
+    .sort((left, right) => right - left);
+  const uids = eligible.slice(0, input.limit);
+  const boundary = uids.at(-1);
+  return {
+    uids,
+    nextCursor: eligible.length > input.limit && boundary !== undefined
+      ? formatImapSearchCursor({
+          uidValidity: input.uidValidity,
+          connectionFingerprint: input.connectionFingerprint,
+          beforeUid: boundary
+        })
+      : undefined
+  };
+};
+
 const closeSmtpTransport = (transport: Transporter): void => {
   (transport as Transporter & { close?: () => void }).close?.();
 };
@@ -335,10 +450,13 @@ export class GenericImapSmtpProvider implements Provider {
 
   async searchMessages(
     input: MessageSearchParams
-  ): Promise<{ items: EmailMessageCompact[]; nextCursor?: string; total?: number }> {
+  ): Promise<{
+    items: EmailMessageCompact[];
+    nextCursor?: string;
+    total?: number;
+    identityEpoch?: string;
+  }> {
     const limit = Math.max(1, Math.min(input.limit ?? SEARCH_DEFAULT_LIMIT, SEARCH_MAX_LIMIT));
-    const cursor = Number.parseInt(input.cursor ?? '0', 10);
-    const safeCursor = Number.isFinite(cursor) && cursor >= 0 ? cursor : 0;
 
     const client = this.buildImapClient();
     await client.connect();
@@ -346,19 +464,31 @@ export class GenericImapSmtpProvider implements Provider {
     try {
       const mailboxLock = await client.getMailboxLock('INBOX');
       try {
+        if (!client.mailbox) throw new Error('mailbox is not open');
+        const uidValidity = client.mailbox.uidValidity.toString();
+        const connectionFingerprint = formatImapConnectionFingerprint({
+          host: this.imapHost,
+          port: this.imapPort,
+          username: this.imapUsername
+        });
         const messageIds = (await client.search(this.buildSearchCriteria(input), { uid: true })) as number[];
-        messageIds.sort((left, right) => right - left);
-        const slice = messageIds.slice(safeCursor, safeCursor + limit);
+        const page = paginateImapUids({
+          messageIds,
+          cursor: input.cursor,
+          limit,
+          uidValidity,
+          connectionFingerprint
+        });
         const items: EmailMessageCompact[] = [];
 
-        for (const uid of slice) {
+        for (const uid of page.uids) {
           const fetched = await this.fetchMessageByUid(client, uid, true);
           if (!fetched) continue;
 
           const parsed = fetched.parsed;
           const snippet = clampText(firstTextOrBody(parsed.text, parsed.html), SNIPPET_MAX);
           items.push({
-            id: String(uid),
+            id: formatImapMessageId(uidValidity, uid, connectionFingerprint),
             accountId: '',
             threadId: buildThreadId(parsed.inReplyTo, parsed.references),
             from: parsed.from[0] ?? { address: '' },
@@ -372,8 +502,14 @@ export class GenericImapSmtpProvider implements Provider {
 
         return {
           items,
-          nextCursor: safeCursor + limit < messageIds.length ? String(safeCursor + limit) : undefined,
-          total: messageIds.length
+          nextCursor: page.nextCursor,
+          total: messageIds.length,
+          identityEpoch: formatImapIdentityEpoch({
+            host: this.imapHost,
+            port: this.imapPort,
+            username: this.imapUsername,
+            uidValidity
+          })
         };
       } finally {
         mailboxLock.release();
@@ -384,10 +520,12 @@ export class GenericImapSmtpProvider implements Provider {
   }
 
   async getMessage(accountId: string, messageId: string): Promise<EmailMessage> {
-    const uid = Number.parseInt(messageId, 10);
-    if (!Number.isFinite(uid) || uid <= 0) {
-      throw new Error('invalid message id');
-    }
+    const {
+      uid,
+      uidValidity: expectedUidValidity,
+      connectionFingerprint: expectedConnectionFingerprint
+    } =
+      parseImapMessageId(messageId);
 
     const client = this.buildImapClient();
     await client.connect();
@@ -395,6 +533,21 @@ export class GenericImapSmtpProvider implements Provider {
     try {
       const mailboxLock = await client.getMailboxLock('INBOX');
       try {
+        if (!client.mailbox) throw new Error('mailbox is not open');
+        const uidValidity = client.mailbox.uidValidity.toString();
+        const connectionFingerprint = formatImapConnectionFingerprint({
+          host: this.imapHost,
+          port: this.imapPort,
+          username: this.imapUsername
+        });
+        assertImapMessageIdentity(
+          {
+            uid,
+            uidValidity: expectedUidValidity,
+            connectionFingerprint: expectedConnectionFingerprint
+          },
+          { uidValidity, connectionFingerprint }
+        );
         const fetched = await this.fetchMessageByUid(client, uid, true);
         if (!fetched) {
           throw new Error('message not found');
@@ -403,11 +556,15 @@ export class GenericImapSmtpProvider implements Provider {
         const parsed = fetched.parsed;
         const body = firstTextOrBody(parsed.text, parsed.html);
         return {
-          id: String(uid),
+          id: formatImapMessageId(uidValidity, uid, connectionFingerprint),
           accountId,
           provider: 'imap_smtp',
           threadId: buildThreadId(parsed.inReplyTo, parsed.references),
-          messageId: parsed.messageId ?? String(uid),
+          messageId: parsed.messageId ?? formatImapMessageId(
+            uidValidity,
+            uid,
+            connectionFingerprint
+          ),
           inReplyTo: parsed.inReplyTo,
           references: parsed.references,
           from: parsed.from[0] ?? { address: '' },

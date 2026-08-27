@@ -11,6 +11,7 @@ import { AccountService } from './services/account-service.js';
 import { MailService } from './services/mail-service.js';
 import { ManagedProtonBridge } from './services/proton-bridge-manager.js';
 import { PythonProtonBridgeController } from './proton/controller.js';
+import { InboundEventService } from './services/inbound-event-service.js';
 
 const setup = (config: RuntimeConfig) => {
   const logger = new Logger(config.logLevel);
@@ -19,6 +20,12 @@ const setup = (config: RuntimeConfig) => {
   const accountService = new AccountService({ db, cryptoService: crypto, config });
   const accessProfileService = new AccessProfileService(db);
   const mailService = new MailService(accountService, db, config);
+  const inboundEventService = new InboundEventService(
+    accountService,
+    db,
+    logger,
+    config.inboundPollIntervalMs
+  );
   const managedProtonBridge = new ManagedProtonBridge({
     controller: new PythonProtonBridgeController({
       pythonBinary: config.protonBridgePython,
@@ -40,11 +47,12 @@ const setup = (config: RuntimeConfig) => {
     accountService,
     accessProfileService,
     mailService,
+    inboundEventService,
     logger,
     managedProtonBridge
   });
 
-  return { app, logger, config, db, managedProtonBridge };
+  return { app, logger, config, db, managedProtonBridge, inboundEventService };
 };
 
 const isExecutable = (path: string): boolean => {
@@ -67,11 +75,19 @@ const isReadable = (path: string): boolean => {
 
 const main = async () => {
   const config = loadConfig();
-  const { app, logger, config: loadedConfig, db, managedProtonBridge } = setup(config);
+  const {
+    app,
+    logger,
+    config: loadedConfig,
+    db,
+    managedProtonBridge,
+    inboundEventService
+  } = setup(config);
 
   void managedProtonBridge.startIfConfigured().catch(() => {
     logger.warn('managed Proton Bridge could not start');
   });
+  inboundEventService.start();
 
   const server = createServer(app);
 
@@ -89,6 +105,7 @@ const main = async () => {
     shuttingDown = true;
     server.close(async () => {
       await managedProtonBridge.shutdown().catch(() => undefined);
+      await inboundEventService.stop();
       db.close();
       logger.info('slab-email stopped');
       process.exit(0);

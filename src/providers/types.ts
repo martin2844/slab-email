@@ -25,6 +25,7 @@ export interface Provider {
     items: EmailMessageCompact[];
     nextCursor?: string;
     total?: number;
+    identityEpoch?: string;
   }>;
   getMessage(accountId: string, messageId: string): Promise<EmailMessage>;
   getThread(accountId: string, threadId: string): Promise<EmailMessage[]>;

@@ -33,6 +33,7 @@ const envSchema = z.object({
   MICROSOFT_TENANT: z.string().trim().default('common'),
   LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('info'),
   MAX_SENDS_PER_ACCOUNT_PER_HOUR: z.coerce.number().int().min(1).max(10_000).default(60),
+  INBOUND_POLL_INTERVAL_SECONDS: z.coerce.number().int().min(0).max(3600).default(30),
   MCP_ALLOWED_ORIGINS: z.preprocess(parseCsv, z.array(z.string()).default(['127.0.0.1:6981'])),
   MCP_ALLOWED_ORIGINS_HOSTS: z
     .preprocess(parseCsv, z.array(z.string()).default(['127.0.0.1', '[::1]', 'localhost'])),
@@ -85,6 +86,7 @@ export interface RuntimeConfig {
   microsoftTenant: string;
   logLevel: 'error' | 'warn' | 'info' | 'debug';
   maxSendsPerAccountPerHour: number;
+  inboundPollIntervalMs: number;
   mcpAllowedOrigins: string[];
   mcpAllowedHostnames: string[];
   publicAdminAllowedOrigins: string[];
@@ -179,6 +181,7 @@ export const loadConfig = (
     microsoftTenant: parsed.MICROSOFT_TENANT,
     logLevel: parsed.LOG_LEVEL,
     maxSendsPerAccountPerHour: parsed.MAX_SENDS_PER_ACCOUNT_PER_HOUR,
+    inboundPollIntervalMs: parsed.INBOUND_POLL_INTERVAL_SECONDS * 1000,
     mcpAllowedOrigins: parsed.MCP_ALLOWED_ORIGINS,
     mcpAllowedHostnames: parsed.MCP_ALLOWED_ORIGINS_HOSTS,
     publicAdminAllowedOrigins: parsed.PUBLIC_ADMIN_ALLOWED_ORIGINS,

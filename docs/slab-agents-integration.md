@@ -51,6 +51,18 @@ For each agent run, choose:
    - allowed accounts
    - operations matching profile flags
 
+## 4a) Inbound automation feed
+
+`slab-agents` consumes `GET /api/inbound/events?after=<cursor>` with the admin
+credential over the private service network. It must persist its cursor and
+deduplicate dispatches by `(automationId, eventId)` before advancing the cursor.
+
+The event is a notification, not an email-body copy. A dispatched agent reads the
+message through its scoped email tools using the supplied account and message IDs.
+The first complete account scan is baseline-only, so connecting an existing
+mailbox does not trigger historical automation runs. Large baselines resume over
+multiple bounded polls and remain silent until completion.
+
 ## 5) UI behavior contract (for agents UI)
 
 ### Settings → Integrations → Email
@@ -90,5 +102,5 @@ At run-time, pass connector token to MCP endpoint only.
 - No main SMTP account password stored in UI.
 - No connector secrets passed through UI state.
 - No attachment download/upload in MVP.
-- No background mailbox sync.
-
+- Metadata-only inbound discovery runs in the background; message bodies remain
+  provider-side and are never persisted in the event feed.

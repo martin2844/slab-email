@@ -106,6 +106,11 @@ export class AgentMailProvider implements Provider {
     };
   }
 
+  private isReceived(message: AgentMailMessage): boolean {
+    const sender = parseAddress(message.from).address.trim().toLowerCase();
+    return sender !== this.config.emailAddress.trim().toLowerCase();
+  }
+
   async searchMessages(input: MessageSearchParams) {
     const query = new URLSearchParams({ limit: String(Math.min(input.limit ?? 20, 100)) });
     if (input.cursor) query.set('page_token', input.cursor);
@@ -118,7 +123,10 @@ export class AgentMailProvider implements Provider {
     const endpoint = input.query ? '/messages/search' : '/messages';
     if (input.query) query.set('q', input.query);
     const result = await this.request<{ messages: AgentMailMessage[]; next_page_token?: string }>(`${endpoint}?${query}`);
-    return { items: result.messages.map((message) => ({ ...this.compact(message), accountId: input.accountId })), nextCursor: result.next_page_token };
+    const messages = input.inboundOnly
+      ? result.messages.filter((message) => this.isReceived(message))
+      : result.messages;
+    return { items: messages.map((message) => ({ ...this.compact(message), accountId: input.accountId })), nextCursor: result.next_page_token };
   }
 
   async getMessage(accountId: string, messageId: string) {

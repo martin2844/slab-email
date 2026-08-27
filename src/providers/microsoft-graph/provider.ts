@@ -72,13 +72,35 @@ export class MicrosoftGraphProvider implements Provider {
   }
 
   private async request<T>(path: string, init: RequestInit = {}) {
+    const messageRequest =
+      path.startsWith('/me/messages') ||
+      path.startsWith('/me/mailFolders/inbox/messages');
     return providerJson<T>(`https://graph.microsoft.com/v1.0${path}`, {
       ...init,
       headers: {
         Authorization: `Bearer ${await this.token()}`, Accept: 'application/json',
+        ...(messageRequest ? { Prefer: 'IdType="ImmutableId"' } : {}),
         ...(init.body ? { 'Content-Type': 'application/json' } : {}), ...(init.headers ?? {}),
       },
     });
+  }
+
+  private messagePagePath(cursor: string): string {
+    let next: URL;
+    try {
+      next = new URL(Buffer.from(cursor, 'base64url').toString('utf8'));
+    } catch {
+      throw new Error('invalid Microsoft Graph message cursor');
+    }
+    if (
+      next.origin !== 'https://graph.microsoft.com' ||
+      !['/v1.0/me/messages', '/v1.0/me/mailFolders/inbox/messages'].includes(
+        next.pathname
+      )
+    ) {
+      throw new Error('invalid Microsoft Graph message cursor');
+    }
+    return `${next.pathname.slice('/v1.0'.length)}${next.search}`;
   }
 
   async verifyConnection() {
@@ -126,7 +148,10 @@ export class MicrosoftGraphProvider implements Provider {
     if (input.since) filters.push(`receivedDateTime ge ${new Date(input.since).toISOString()}`);
     if (input.before) filters.push(`receivedDateTime lt ${new Date(input.before).toISOString()}`);
     if (filters.length) query.set('$filter', filters.join(' and '));
-    const result = await this.request<{ value: GraphMessage[]; '@odata.nextLink'?: string }>(`/me/messages?${query}`, {
+    const messagePath = input.inboundOnly
+      ? '/me/mailFolders/inbox/messages'
+      : '/me/messages';
+    const result = await this.request<{ value: GraphMessage[]; '@odata.nextLink'?: string }>(input.cursor ? this.messagePagePath(input.cursor) : `${messagePath}?${query}`, {
       headers: input.query ? { ConsistencyLevel: 'eventual' } : undefined,
     });
     const from = input.from?.toLowerCase();
@@ -137,7 +162,12 @@ export class MicrosoftGraphProvider implements Provider {
       (!to || (message.toRecipients ?? []).some((entry) => graphAddress(entry).address.includes(to))) &&
       (!subject || (message.subject || '').toLowerCase().includes(subject)),
     );
-    return { items: value.map((message) => this.compact(input.accountId, message)), nextCursor: undefined };
+    return {
+      items: value.map((message) => this.compact(input.accountId, message)),
+      nextCursor: result['@odata.nextLink']
+        ? Buffer.from(result['@odata.nextLink'], 'utf8').toString('base64url')
+        : undefined,
+    };
   }
 
   async getMessage(accountId: string, messageId: string) {

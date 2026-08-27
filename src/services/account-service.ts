@@ -18,6 +18,21 @@ import { google } from 'googleapis';
 import { providerJson } from '../providers/http-json.js';
 
 const STATE_TTL_MS = 10 * 60 * 1000;
+const INBOUND_CONFIG_KEYS: ReadonlyArray<keyof UpdateAccountInput> = [
+  'imapHost',
+  'imapPort',
+  'imapTlsMode',
+  'customCA',
+  'customTls',
+  'inboxId',
+  'baseUrl',
+  'inboundEnabled'
+];
+
+const configValue = (
+  config: EmailAccountConfig,
+  key: keyof UpdateAccountInput
+): unknown => (config as unknown as Record<string, unknown>)[key];
 
 export interface ProtonBridgeAccountInput {
   emailAddress: string;
@@ -153,15 +168,14 @@ export class AccountService {
   createProtonBridgeAccount(input: ProtonBridgeAccountInput): AccountRecord {
     const id = randomUUID();
     const config = this.parseConfigForImap(input);
-    this.deps.db.upsertEmailAccount({
+    this.persistAccount({
       id,
       provider: 'proton_bridge',
       emailAddress: input.emailAddress,
       displayName: input.displayName,
       enabled: true,
       config
-    });
-    this.storeEncryptedSecrets(id, {
+    }, {
       username: input.username,
       password: input.password
     });
@@ -185,7 +199,14 @@ export class AccountService {
       managedBridge: true,
       managedBridgeLogin: input.managedBridgeLogin ?? input.emailAddress
     };
-    this.deps.db.upsertEmailAccount({
+    const currentSecrets = existing ? this.getDecryptedSecrets(existing.id) : undefined;
+    const advanceInboundGeneration = !existing ||
+      INBOUND_CONFIG_KEYS.some(
+        (key) => !Object.is(configValue(existing.config, key), configValue(config, key))
+      ) ||
+      currentSecrets?.username !== input.username ||
+      currentSecrets?.password !== input.password;
+    this.persistAccount({
       id,
       provider: 'proton_bridge',
       emailAddress: input.emailAddress,
@@ -194,26 +215,24 @@ export class AccountService {
       config,
       connectionStatus: existing?.lastConnectionStatus ?? null,
       connectionAt: existing?.lastConnectionAt ?? null
-    });
-    this.storeEncryptedSecrets(id, {
+    }, {
       username: input.username,
       password: input.password
-    });
+    }, advanceInboundGeneration);
     return this.getAccount(id);
   }
 
   createImapSmtpAccount(input: ImapSmtpAccountInput): AccountRecord {
     const id = randomUUID();
     const config = this.parseConfigForImap(input);
-    this.deps.db.upsertEmailAccount({
+    this.persistAccount({
       id,
       provider: 'imap_smtp',
       emailAddress: input.emailAddress,
       displayName: input.displayName,
       enabled: true,
       config
-    });
-    this.storeEncryptedSecrets(id, {
+    }, {
       username: input.username,
       password: input.password
     });
@@ -228,11 +247,10 @@ export class AccountService {
       inboxId: input.inboxId,
       baseUrl: (input.baseUrl || 'https://api.agentmail.to/v0').replace(/\/$/, ''),
     };
-    this.deps.db.upsertEmailAccount({
+    this.persistAccount({
       id, provider: 'agentmail', emailAddress: input.emailAddress,
       displayName: input.displayName, enabled: true, config,
-    });
-    this.storeEncryptedSecrets(id, { apiKey: input.apiKey });
+    }, { apiKey: input.apiKey });
     return this.getAccount(id);
   }
 
@@ -244,11 +262,10 @@ export class AccountService {
       baseUrl: (input.baseUrl || 'https://api.resend.com').replace(/\/$/, ''),
       inboundEnabled: input.inboundEnabled ?? false,
     };
-    this.deps.db.upsertEmailAccount({
+    this.persistAccount({
       id, provider: 'resend', emailAddress: input.emailAddress,
       displayName: input.displayName, enabled: true, config,
-    });
-    this.storeEncryptedSecrets(id, { apiKey: input.apiKey });
+    }, { apiKey: input.apiKey });
     return this.getAccount(id);
   }
 
@@ -274,7 +291,28 @@ export class AccountService {
       ...(input as UpdateAccountInput)
     } as EmailAccountConfig;
 
-    this.deps.db.upsertEmailAccount({
+    let inboundSecretsChanged = false;
+    const nextSecrets = secrets?.username || secrets?.password || secrets?.apiKey
+      ? (() => {
+          const current = this.getDecryptedSecrets(accountId);
+          inboundSecretsChanged =
+            (secrets.username !== undefined && secrets.username !== current.username) ||
+            (secrets.password !== undefined && secrets.password !== current.password) ||
+            (secrets.apiKey !== undefined && secrets.apiKey !== current.apiKey);
+          return {
+            username: secrets.username ?? current.username,
+            password: secrets.password ?? current.password,
+            refreshToken: current.refreshToken,
+            apiKey: secrets.apiKey ?? current.apiKey
+          };
+        })()
+      : undefined;
+    const inboundConfigChanged = INBOUND_CONFIG_KEYS.some(
+      (key) => key in input &&
+        !Object.is(configValue(account.config, key), configValue(nextConfig, key))
+    );
+
+    this.persistAccount({
       id: account.id,
       provider: account.provider,
       emailAddress: account.emailAddress,
@@ -283,17 +321,7 @@ export class AccountService {
       config: nextConfig,
       connectionStatus: account.lastConnectionStatus,
       connectionAt: account.lastConnectionAt
-    });
-
-    if (secrets?.username || secrets?.password || secrets?.apiKey) {
-      const current = this.getDecryptedSecrets(accountId);
-      this.storeEncryptedSecrets(accountId, {
-        username: secrets.username ?? current.username,
-        password: secrets.password ?? current.password,
-        refreshToken: current.refreshToken,
-        apiKey: secrets.apiKey ?? current.apiKey,
-      });
-    }
+    }, nextSecrets, inboundConfigChanged || inboundSecretsChanged);
 
     return this.getAccount(account.id);
   }
@@ -395,6 +423,19 @@ export class AccountService {
       microsoftClientSecret: microsoft.clientSecret,
       microsoftTenant: microsoft.tenant,
     });
+  }
+
+  async getInboundProviderSnapshot(accountId: string) {
+    const generation = this.deps.db.getEmailAccountInboundGeneration(accountId);
+    if (generation === undefined) {
+      throw new ApiError(ERROR_CODES.ACCOUNT_NOT_FOUND, 'Account not found', 404);
+    }
+    const account = this.getAccount(accountId);
+    const provider = await this.getProviderForAccount(accountId);
+    if (this.deps.db.getEmailAccountInboundGeneration(accountId) !== generation) {
+      throw new Error('email account changed while creating provider');
+    }
+    return { account, generation, provider };
   }
 
   getGoogleOAuthSettings(): GoogleOAuthSettings {
@@ -525,9 +566,35 @@ export class AccountService {
     );
   }
 
-  private storeEncryptedSecrets(accountId: string, payload: { username?: string; password?: string; refreshToken?: string; apiKey?: string }): void {
+  private encryptSecrets(payload: {
+    username?: string;
+    password?: string;
+    refreshToken?: string;
+    apiKey?: string;
+  }) {
     const encrypted = this.deps.cryptoService.encrypt(JSON.stringify(payload));
-    this.deps.db.setEmailAccountSecret(accountId, encrypted.encryptedPayload, encrypted.iv, encrypted.authTag);
+    return {
+      encryptedPayload: encrypted.encryptedPayload,
+      iv: encrypted.iv,
+      authTag: encrypted.authTag
+    };
+  }
+
+  private persistAccount(
+    account: Parameters<DatabaseService['upsertEmailAccount']>[0],
+    secrets?: {
+      username?: string;
+      password?: string;
+      refreshToken?: string;
+      apiKey?: string;
+    },
+    advanceInboundGeneration = true
+  ): void {
+    this.deps.db.upsertEmailAccountWithSecret(
+      account,
+      secrets ? this.encryptSecrets(secrets) : undefined,
+      advanceInboundGeneration
+    );
   }
 
   createGmailAuthorizationUrl(options: GmailConnectOptions = {}): {
@@ -630,16 +697,14 @@ export class AccountService {
       displayName
     };
 
-    this.deps.db.upsertEmailAccount({
+    this.persistAccount({
       id,
       provider: 'gmail',
       emailAddress,
       displayName,
       enabled: true,
       config
-    });
-
-    this.storeEncryptedSecrets(id, { refreshToken });
+    }, { refreshToken });
 
     return {
       accountId: id,
@@ -708,8 +773,10 @@ export class AccountService {
     const id = randomUUID();
     const displayName = me.displayName || emailAddress;
     const config: MicrosoftGraphAccountConfig = { emailAddress, displayName, tenant: credentials.tenant };
-    this.deps.db.upsertEmailAccount({ id, provider: 'microsoft_graph', emailAddress, displayName, enabled: true, config });
-    this.storeEncryptedSecrets(id, { refreshToken: token.refresh_token });
+    this.persistAccount(
+      { id, provider: 'microsoft_graph', emailAddress, displayName, enabled: true, config },
+      { refreshToken: token.refresh_token }
+    );
     return { accountId: id, emailAddress };
   }
 

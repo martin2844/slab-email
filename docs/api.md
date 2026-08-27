@@ -158,6 +158,30 @@ omit `clientSecret` to keep the stored value while updating the client ID.
 }
 ```
 
+### `GET /api/inbound/events`
+
+Returns durable inbound metadata events in ascending ID order. Query parameters:
+
+- `after`: exclusive numeric event cursor (default `0`)
+- `accountId`: optional account UUID filter
+- `limit`: `1`–`100` (default `100`)
+
+The response `nextCursor` is the last returned event ID, or `null` when no rows
+were returned. Events intentionally omit message bodies and snippets. Consumers
+can fetch a message through the scoped mail API using `accountId` and `messageId`.
+
+### `GET /api/inbound/status`
+
+Returns per-account poll baseline, last-success timestamp, resumable scan cursor,
+and last error. An account with `initializedAt: null` has not completed its safe
+baseline and will not emit events yet. A non-null `scanCursor` means the bounded
+scan will continue on the next poll.
+
+### `POST /api/inbound/poll`
+
+Runs one inbound discovery pass. Concurrent requests share the same in-flight
+pass. This endpoint and both inbound read endpoints require the admin token.
+
 ### `POST /api/access-profiles`
 
 Create access profile.

@@ -61,6 +61,7 @@ export interface EmailMessageCompact {
 
 export interface MessageSearchParams {
   accountId: string;
+  inboundOnly?: boolean;
   query?: string;
   from?: string;
   to?: string;
@@ -229,6 +230,31 @@ export interface SendOperationRecord {
   createdAt: string;
   updatedAt: string;
   errorCode?: string | null;
+}
+
+export interface InboundEmailEvent {
+  id: number;
+  accountId: string;
+  provider: ProviderType;
+  messageId: string;
+  threadId?: string | null;
+  from: EmailAddress;
+  to: EmailAddress[];
+  subject: string;
+  receivedAt: string;
+  discoveredAt: string;
+}
+
+export interface InboundPollState {
+  accountId: string;
+  initializedAt?: string | null;
+  lastSuccessfulPollAt?: string | null;
+  lastError?: string | null;
+  scanCursor?: string | null;
+  scanStartedAt?: string | null;
+  identityEpoch?: string | null;
+  accountGeneration: number;
+  updatedAt: string;
 }
 
 export interface ScopedAuthContext {

@@ -15,6 +15,8 @@
    - `AccountService`: account CRUD + provider factory wiring.
    - `AccessProfileService`: profiles, capability sets, token metadata.
    - `MailService`: permission checks + operation orchestration.
+   - `InboundEventService`: bounded polling, baseline establishment, and durable
+     metadata event discovery for readable accounts.
 
 3. **Provider layer**
    - `Provider` interface:
@@ -39,6 +41,9 @@
 - `access_tokens` (token hash + prefix + timestamps)
 - `send_operations`
 - `oauth_states`
+- `inbound_seen_messages` (deduplication boundary)
+- `inbound_events` (append-only metadata; no message body or snippet)
+- `inbound_poll_state` (baseline/checkpoint/error state)
 
 ## Provider abstraction
 
@@ -72,6 +77,46 @@
 - No message bodies are persisted.
 - Runtime logger redacts sensitive keys in metadata.
 
+## Inbound event discovery
+
+- The first successful scan exhausts the provider inbox as a baseline and emits
+  no events, so enabling the feature cannot replay existing mail as new work.
+- Each invocation processes at most 5,000 messages. Larger baselines or catch-up
+  scans persist their provider cursor and resume on the next invocation; each page
+  and its next cursor are committed in one scan-identity-guarded transaction.
+- Expired or rejected provider cursors restart the same logical scan from page one.
+  Partial page writes are deduplicated and do not become a false old-mail boundary.
+- Later scans use an overlap window and stop at an already-seen message boundary.
+  Account/message uniqueness makes retries safe.
+- Only enabled accounts with read and search capabilities are polled.
+- Discovery is provider-native inbox-only: Gmail uses its inbox label, Microsoft
+  Graph uses the inbox folder, IMAP/Resend use inbound endpoints, and AgentMail
+  filters self-sent messages while retaining its provider pagination.
+- Graph requests opt into immutable message IDs. IMAP scan epochs combine
+  `UIDVALIDITY` with a non-secret connection-identity fingerprint, preventing
+  mailbox rebuilds or account repoints from corrupting deduplication.
+- IMAP continuation cursors use a UID boundary bound to that same identity epoch,
+  so messages moving into or out of the inbox between pages cannot shift an
+  offset and skip older mail.
+- Newly issued IMAP message IDs carry the same fingerprint and are rejected if
+  fetched after the account is repointed. Legacy bare and UIDVALIDITY-only IDs
+  remain readable for compatibility.
+- Page commits also require the account's captured inbound generation and enabled
+  state, so disabling or changing its inbound endpoint, identity, capability, or
+  credentials during provider I/O rolls the page back instead of publishing
+  stale-mailbox events. Cosmetic and SMTP-only edits preserve that generation.
+- Poll state is bound to that generation for every provider. Repointing AgentMail,
+  Resend, OAuth, or IMAP accounts clears any old cursor/seen boundary and requires
+  a replacement silent baseline.
+- Account configuration and encrypted credential changes commit in one database
+  transaction, so provider snapshots cannot observe a new endpoint with old
+  credentials (or the inverse).
+- Events contain routing metadata (`accountId`, provider/message/thread IDs,
+  addresses, subject, timestamps). Bodies and snippets remain provider-side and
+  must be fetched through the scoped operational API or MCP tool.
+- `INBOUND_POLL_INTERVAL_SECONDS=0` disables background polling. The authenticated
+  manual poll endpoint remains available for operations and tests.
+
 ## Anti-loop guard
 
 - `MAX_SENDS_PER_ACCOUNT_PER_HOUR` (default `60`) prevents excessive outbound sends per account/profile.
@@ -80,6 +125,5 @@
 
 - No attachment end-to-end operations
 - No mailbox replication or local index
-- No campaign/automation campaign mode
+- No campaign/automation execution; consumers such as `slab-agents` own dispatch
 - No webmail UI
-

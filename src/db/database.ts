@@ -7,6 +7,9 @@ import {
   AccessProfileWithAccounts,
   AccountRecord,
   EmailAccountConfig,
+  EmailMessageCompact,
+  InboundEmailEvent,
+  InboundPollState,
   OAuthMetaState,
   OAuthState,
   ProviderType,
@@ -119,6 +122,21 @@ interface SendOperationRow {
   created_at: string;
   updated_at: string;
 }
+
+interface InboundEventRow {
+  id: number;
+  account_id: string;
+  provider: ProviderType;
+  message_id: string;
+  thread_id: string | null;
+  from_json: string;
+  to_json: string;
+  subject: string;
+  received_at: string;
+  discovered_at: string;
+}
+
+export class InboundScanStateChangedError extends Error {}
 
 export class DatabaseService {
   private readonly db: Database.Database;
@@ -244,6 +262,7 @@ export class DatabaseService {
     });
     apply.immediate();
     this.migrateProviderTypes();
+    this.migrateInboundEvents();
   }
 
   private migrateProviderTypes(): void {
@@ -294,6 +313,60 @@ export class DatabaseService {
     if (violations.length > 0) throw new Error('provider migration violated foreign keys');
   }
 
+  private migrateInboundEvents(): void {
+    const applied = this.db
+      .prepare('SELECT 1 FROM schema_migrations WHERE version = 4')
+      .get();
+    if (applied) return;
+    const migration = this.db.transaction(() => {
+      this.db.exec(
+        'ALTER TABLE email_accounts ADD COLUMN inbound_generation INTEGER NOT NULL DEFAULT 1'
+      );
+      this.db.exec(`
+        CREATE TABLE inbound_seen_messages (
+          account_id TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          message_date TEXT NOT NULL,
+          first_seen_at TEXT NOT NULL,
+          PRIMARY KEY(account_id, message_id),
+          FOREIGN KEY(account_id) REFERENCES email_accounts(id) ON DELETE CASCADE
+        );
+        CREATE TABLE inbound_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          account_id TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          thread_id TEXT,
+          from_json TEXT NOT NULL,
+          to_json TEXT NOT NULL,
+          subject TEXT NOT NULL,
+          received_at TEXT NOT NULL,
+          discovered_at TEXT NOT NULL,
+          UNIQUE(account_id, message_id),
+          FOREIGN KEY(account_id) REFERENCES email_accounts(id) ON DELETE CASCADE
+        );
+        CREATE TABLE inbound_poll_state (
+          account_id TEXT PRIMARY KEY,
+          initialized_at TEXT,
+          last_successful_poll_at TEXT,
+          last_error TEXT,
+          scan_cursor TEXT,
+          scan_started_at TEXT,
+          identity_epoch TEXT,
+          account_generation INTEGER NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(account_id) REFERENCES email_accounts(id) ON DELETE CASCADE
+        );
+        CREATE INDEX idx_inbound_events_account_id ON inbound_events(account_id, id);
+        CREATE INDEX idx_inbound_events_received_at ON inbound_events(received_at);
+      `);
+      this.db.prepare(
+        'INSERT INTO schema_migrations(version, name, applied_at) VALUES (4, ?, ?)'
+      ).run('durable_inbound_events', nowIso());
+    });
+    migration.immediate();
+  }
+
   getMigrationStatus(): { ready: boolean; expected: number[]; applied: number[]; pending: number[] } {
     const table = this.db.prepare(
       "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
@@ -303,7 +376,7 @@ export class DatabaseService {
           version: number;
         }>).map(({ version }) => version)
       : [];
-    const expected = [1, 2, 3];
+    const expected = [1, 2, 3, 4];
     const pending = expected.filter((version) => !applied.includes(version));
     return { ready: pending.length === 0, expected, applied, pending };
   }
@@ -340,6 +413,13 @@ export class DatabaseService {
     return row ? this.mapAccount(row) : undefined;
   }
 
+  getEmailAccountInboundGeneration(accountId: string): number | undefined {
+    const row = this.db
+      .prepare('SELECT inbound_generation FROM email_accounts WHERE id=?')
+      .get(accountId) as { inbound_generation: number } | undefined;
+    return row?.inbound_generation;
+  }
+
   upsertEmailAccount(data: {
     id: string;
     provider: ProviderType;
@@ -349,7 +429,7 @@ export class DatabaseService {
     config: EmailAccountConfig;
     connectionStatus?: string | null;
     connectionAt?: string | null;
-  }): void {
+  }, advanceInboundGeneration = true): void {
     const existing = this.getEmailAccountById(data.id);
     const now = nowIso();
 
@@ -365,7 +445,8 @@ export class DatabaseService {
               config_json=@configJson,
               updated_at=@updatedAt,
               last_connection_status=@status,
-              last_connection_at=@at
+              last_connection_at=@at,
+              inbound_generation=inbound_generation+@advanceInboundGeneration
           WHERE id=@id
           `
         )
@@ -378,7 +459,8 @@ export class DatabaseService {
           configJson: JSON.stringify(data.config),
           updatedAt: now,
           status: data.connectionStatus ?? null,
-          at: data.connectionAt ?? null
+          at: data.connectionAt ?? null,
+          advanceInboundGeneration: advanceInboundGeneration ? 1 : 0
         });
       return;
     }
@@ -426,14 +508,36 @@ export class DatabaseService {
       });
   }
 
+  upsertEmailAccountWithSecret(
+    data: Parameters<DatabaseService['upsertEmailAccount']>[0],
+    secret?: { encryptedPayload: string; iv: string; authTag: string },
+    advanceInboundGeneration = true
+  ): void {
+    this.db.transaction(() => {
+      this.upsertEmailAccount(data, advanceInboundGeneration);
+      if (secret) {
+        this.setEmailAccountSecret(
+          data.id,
+          secret.encryptedPayload,
+          secret.iv,
+          secret.authTag
+        );
+      }
+    }).immediate();
+  }
+
   removeEmailAccount(id: string): void {
     this.db.prepare('DELETE FROM email_accounts WHERE id = ?').run(id);
   }
 
   setAccountEnabled(id: string, enabled: boolean): void {
     this.db
-      .prepare('UPDATE email_accounts SET enabled = ?, updated_at = ? WHERE id = ?')
-      .run(enabled ? 1 : 0, nowIso(), id);
+      .prepare(
+        `UPDATE email_accounts SET
+           enabled=?,updated_at=?,inbound_generation=inbound_generation+1
+         WHERE id=? AND enabled<>?`
+      )
+      .run(enabled ? 1 : 0, nowIso(), id, enabled ? 1 : 0);
   }
 
   updateAccountConnectionStatus(accountId: string, status: string, connectedAt?: string): void {
@@ -990,6 +1094,323 @@ export class DatabaseService {
 
   getAuditForOperation(accountId: string, idempotencyKey: string): SendOperationRecord | undefined {
     return this.getSendOperation(accountId, idempotencyKey);
+  }
+
+  getInboundPollState(accountId: string): InboundPollState | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT account_id,initialized_at,last_successful_poll_at,last_error,scan_cursor,scan_started_at,identity_epoch,account_generation,updated_at
+         FROM inbound_poll_state WHERE account_id=?`
+      )
+      .get(accountId) as
+      | {
+          account_id: string;
+          initialized_at: string | null;
+          last_successful_poll_at: string | null;
+          last_error: string | null;
+          scan_cursor: string | null;
+          scan_started_at: string | null;
+          identity_epoch: string | null;
+          account_generation: number;
+          updated_at: string;
+        }
+      | undefined;
+    return row
+      ? {
+          accountId: row.account_id,
+          initializedAt: row.initialized_at,
+          lastSuccessfulPollAt: row.last_successful_poll_at,
+          lastError: row.last_error,
+          scanCursor: row.scan_cursor,
+          scanStartedAt: row.scan_started_at,
+          identityEpoch: row.identity_epoch,
+          accountGeneration: row.account_generation,
+          updatedAt: row.updated_at
+        }
+      : undefined;
+  }
+
+  listInboundPollStates(): InboundPollState[] {
+    return this.getEmailAccounts().flatMap((account) => {
+      const state = this.getInboundPollState(account.id);
+      return state ? [state] : [];
+    });
+  }
+
+  hasSeenInboundMessageBefore(
+    accountId: string,
+    messageId: string,
+    before: string
+  ): boolean {
+    return Boolean(
+      this.db
+        .prepare(
+          `SELECT 1 FROM inbound_seen_messages
+           WHERE account_id=? AND message_id=? AND first_seen_at<?`
+        )
+        .get(accountId, messageId, before)
+    );
+  }
+
+  beginInboundScan(
+    accountId: string,
+    accountGeneration: number,
+    scanStartedAt: string
+  ): InboundPollState {
+    return this.db.transaction(() => {
+      const current = this.getInboundPollState(accountId);
+      if (!current) {
+        this.db
+          .prepare(
+            `INSERT INTO inbound_poll_state
+             (account_id,initialized_at,last_successful_poll_at,last_error,scan_cursor,scan_started_at,identity_epoch,account_generation,updated_at)
+             VALUES (?,NULL,NULL,NULL,NULL,?,NULL,?,?)`
+          )
+          .run(accountId, scanStartedAt, accountGeneration, scanStartedAt);
+      } else if (current.accountGeneration !== accountGeneration) {
+        this.db
+          .prepare(
+            `UPDATE inbound_poll_state SET
+               initialized_at=NULL,last_successful_poll_at=NULL,last_error=NULL,
+               scan_cursor=NULL,scan_started_at=?,identity_epoch=NULL,
+               account_generation=?,updated_at=?
+             WHERE account_id=?`
+          )
+          .run(scanStartedAt, accountGeneration, scanStartedAt, accountId);
+        this.db
+          .prepare('DELETE FROM inbound_seen_messages WHERE account_id=?')
+          .run(accountId);
+      } else {
+        this.db
+          .prepare(
+            `UPDATE inbound_poll_state SET
+               scan_started_at=COALESCE(scan_started_at,?),
+               last_error=NULL,updated_at=?
+             WHERE account_id=?`
+          )
+          .run(scanStartedAt, scanStartedAt, accountId);
+      }
+      return this.getInboundPollState(accountId)!;
+    })();
+  }
+
+  recordInboundPage(input: {
+    account: AccountRecord;
+    messages: EmailMessageCompact[];
+    emitEvents: boolean;
+    discoveredAt: string;
+    scanStartedAt: string;
+    expectedCursor?: string;
+    nextCursor?: string;
+    complete: boolean;
+    expectedIdentityEpoch?: string;
+    identityEpoch?: string;
+    accountGeneration: number;
+  }): { discovered: number; emitted: number } {
+    return this.db.transaction(() => {
+      const currentAccount = this.db
+        .prepare(
+          `SELECT 1 FROM email_accounts
+           WHERE id=? AND enabled=1 AND inbound_generation=?`
+        )
+        .get(input.account.id, input.accountGeneration);
+      if (!currentAccount) {
+        throw new InboundScanStateChangedError('inbound account state changed');
+      }
+      let discovered = 0;
+      let emitted = 0;
+      const insertSeen = this.db.prepare(
+        `INSERT OR IGNORE INTO inbound_seen_messages
+         (account_id,message_id,message_date,first_seen_at) VALUES (?,?,?,?)`
+      );
+      const insertEvent = this.db.prepare(
+        `INSERT OR IGNORE INTO inbound_events
+         (account_id,provider,message_id,thread_id,from_json,to_json,subject,received_at,discovered_at)
+         VALUES (?,?,?,?,?,?,?,?,?)`
+      );
+      for (const message of input.messages) {
+        const seen = insertSeen.run(
+          input.account.id,
+          message.id,
+          message.date,
+          input.discoveredAt
+        );
+        if (seen.changes !== 1) continue;
+        discovered += 1;
+        if (!input.emitEvents) continue;
+        const event = insertEvent.run(
+          input.account.id,
+          input.account.provider,
+          message.id,
+          message.threadId ?? null,
+          JSON.stringify(message.from),
+          JSON.stringify(message.to),
+          message.subject,
+          message.date,
+          input.discoveredAt
+        );
+        emitted += event.changes;
+      }
+      const advanced = input.complete
+        ? this.db
+            .prepare(
+              `UPDATE inbound_poll_state SET
+                 initialized_at=COALESCE(initialized_at,?),
+                 last_successful_poll_at=?,
+                 last_error=NULL,
+                 scan_cursor=NULL,
+                 scan_started_at=NULL,
+                 identity_epoch=?,
+                 updated_at=?
+               WHERE account_id=? AND scan_started_at=? AND scan_cursor IS ?
+                 AND identity_epoch IS ? AND account_generation=?`
+            )
+            .run(
+              input.discoveredAt,
+              input.scanStartedAt,
+              input.identityEpoch ?? null,
+              input.discoveredAt,
+              input.account.id,
+              input.scanStartedAt,
+              input.expectedCursor ?? null,
+              input.expectedIdentityEpoch ?? null,
+              input.accountGeneration
+            ).changes
+        : this.db
+            .prepare(
+              `UPDATE inbound_poll_state SET
+                 scan_cursor=?,identity_epoch=?,last_error=NULL,updated_at=?
+               WHERE account_id=? AND scan_started_at=? AND scan_cursor IS ?
+                 AND identity_epoch IS ? AND account_generation=?`
+            )
+            .run(
+              input.nextCursor,
+              input.identityEpoch ?? null,
+              input.discoveredAt,
+              input.account.id,
+              input.scanStartedAt,
+              input.expectedCursor ?? null,
+              input.expectedIdentityEpoch ?? null,
+              input.accountGeneration
+            ).changes;
+      if (advanced !== 1) throw new InboundScanStateChangedError(
+        'inbound scan state changed'
+      );
+      return { discovered, emitted };
+    })();
+  }
+
+  rebaselineInboundIdentity(input: {
+    accountId: string;
+    scanStartedAt: string;
+    expectedCursor?: string;
+    expectedIdentityEpoch: string;
+    identityEpoch: string;
+    restartedAt: string;
+    accountGeneration: number;
+  }): void {
+    this.db.transaction(() => {
+      const currentAccount = this.db
+        .prepare(
+          `SELECT 1 FROM email_accounts
+           WHERE id=? AND enabled=1 AND inbound_generation=?`
+        )
+        .get(input.accountId, input.accountGeneration);
+      if (!currentAccount) {
+        throw new InboundScanStateChangedError('inbound account state changed');
+      }
+      const changed = this.db
+        .prepare(
+          `UPDATE inbound_poll_state SET
+             initialized_at=NULL,
+             last_successful_poll_at=NULL,
+             last_error=NULL,
+             scan_cursor=NULL,
+             scan_started_at=?,
+             identity_epoch=?,
+             updated_at=?
+           WHERE account_id=? AND scan_started_at=? AND scan_cursor IS ?
+             AND identity_epoch=? AND account_generation=?`
+        )
+        .run(
+          input.restartedAt,
+          input.identityEpoch,
+          input.restartedAt,
+          input.accountId,
+          input.scanStartedAt,
+          input.expectedCursor ?? null,
+          input.expectedIdentityEpoch,
+          input.accountGeneration
+        ).changes;
+      if (changed !== 1) {
+        throw new InboundScanStateChangedError('inbound scan state changed');
+      }
+      this.db
+        .prepare('DELETE FROM inbound_seen_messages WHERE account_id=?')
+        .run(input.accountId);
+    })();
+  }
+
+  markInboundPollError(
+    accountId: string,
+    message: string,
+    scanStartedAt: string,
+    accountGeneration: number,
+    expectedCursor?: string
+  ): boolean {
+    return this.db
+      .prepare(
+        `UPDATE inbound_poll_state SET
+           last_error=?,
+           scan_cursor=CASE WHEN ? THEN NULL ELSE scan_cursor END,
+           updated_at=?
+         WHERE account_id=? AND scan_started_at=? AND scan_cursor IS ?
+           AND account_generation=?`
+      )
+      .run(
+        message.slice(0, 500),
+        expectedCursor === undefined ? 0 : 1,
+        nowIso(),
+        accountId,
+        scanStartedAt,
+        expectedCursor ?? null,
+        accountGeneration
+      ).changes === 1;
+  }
+
+  listInboundEvents(input: {
+    afterId?: number;
+    accountId?: string;
+    limit?: number;
+  }): { items: InboundEmailEvent[]; nextCursor: string | null } {
+    const limit = Math.max(1, Math.min(input.limit ?? 100, 100));
+    const afterId = Math.max(0, input.afterId ?? 0);
+    const rows = (input.accountId
+      ? this.db
+          .prepare(
+            `SELECT * FROM inbound_events
+             WHERE id>? AND account_id=? ORDER BY id LIMIT ?`
+          )
+          .all(afterId, input.accountId, limit)
+      : this.db
+          .prepare('SELECT * FROM inbound_events WHERE id>? ORDER BY id LIMIT ?')
+          .all(afterId, limit)) as InboundEventRow[];
+    const items = rows.map((row): InboundEmailEvent => ({
+      id: row.id,
+      accountId: row.account_id,
+      provider: row.provider,
+      messageId: row.message_id,
+      threadId: row.thread_id,
+      from: JSON.parse(row.from_json) as InboundEmailEvent['from'],
+      to: JSON.parse(row.to_json) as InboundEmailEvent['to'],
+      subject: row.subject,
+      receivedAt: row.received_at,
+      discoveredAt: row.discovered_at
+    }));
+    return {
+      items,
+      nextCursor: items.length ? String(items.at(-1)!.id) : null
+    };
   }
 
   close(): void {

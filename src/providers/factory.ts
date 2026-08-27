@@ -13,6 +13,7 @@ import { GmailProvider } from './gmail/provider.js';
 import { ProtonBridgeProvider } from './proton-bridge/provider.js';
 import { MicrosoftGraphProvider } from './microsoft-graph/provider.js';
 import { ResendProvider } from './resend/provider.js';
+import type { Provider } from './types.js';
 
 export interface SecretBundle {
   username?: string;
@@ -74,7 +75,11 @@ const toGenericConfig = (account: AccountRecord, secret: SecretBundle): GenericI
   };
 };
 
-export const createProvider = (account: AccountRecord, secret: SecretBundle, runtimeConfig: RuntimeConfig) => {
+export const createProvider = (
+  account: AccountRecord,
+  secret: SecretBundle,
+  runtimeConfig: RuntimeConfig
+): Provider => {
   if (account.provider === 'gmail') {
     if (!secret.refreshToken) {
       throw new Error('Missing Gmail refresh token');

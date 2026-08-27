@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 
 import { createTestContext } from './helpers.js';
+import { DatabaseService } from '../src/db/database.js';
 
 const adminHeaders = (adminKey: string) => ({
   Authorization: `Bearer ${adminKey}`
@@ -84,6 +85,49 @@ describe('account service endpoints', () => {
       })
       .expect(200);
     expect(update.body.displayName).toBe('Martin New');
+  });
+
+  it('publishes account config and credential updates atomically', () => {
+    const account = ctx.accountService.createImapSmtpAccount({
+      ...baseProtonPayload,
+      emailAddress: 'atomic@example.com'
+    });
+    const observer = new DatabaseService(ctx.config.databasePath, {
+      migrate: false
+    });
+    const originalGeneration = ctx.db.getEmailAccountInboundGeneration(account.id);
+    const secretWrite = vi
+      .spyOn(ctx.db, 'setEmailAccountSecret')
+      .mockImplementationOnce(() => {
+        expect(
+          (observer.getEmailAccountById(account.id)?.config as { imapHost: string })
+            .imapHost
+        ).toBe(baseProtonPayload.imapHost);
+        const observedSecret = observer.getEmailAccountSecret(account.id)!;
+        expect(JSON.parse(ctx.cryptoService.decrypt(observedSecret))).toMatchObject({
+          username: baseProtonPayload.username,
+          password: baseProtonPayload.password
+        });
+        throw new Error('simulated credential write failure');
+      });
+
+    expect(() =>
+      ctx.accountService.updateAccount(
+        account.id,
+        { imapHost: 'replacement.example.com' },
+        { username: 'replacement-user', password: 'replacement-password' }
+      )
+    ).toThrow('simulated credential write failure');
+
+    expect(
+      (ctx.accountService.getAccount(account.id).config as { imapHost: string })
+        .imapHost
+    ).toBe(baseProtonPayload.imapHost);
+    expect(ctx.db.getEmailAccountInboundGeneration(account.id)).toBe(
+      originalGeneration
+    );
+    secretWrite.mockRestore();
+    observer.close();
   });
 
   it('supports account lifecycle operations', async () => {

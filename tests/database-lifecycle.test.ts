@@ -20,19 +20,19 @@ describe('database lifecycle', () => {
     try {
       expect(database.getMigrationStatus()).toEqual({
         ready: false,
-        expected: [1, 2, 3],
+        expected: [1, 2, 3, 4],
         applied: [],
-        pending: [1, 2, 3]
+        pending: [1, 2, 3, 4]
       });
       database.migrate();
       expect(database.getMigrationStatus()).toEqual({
         ready: true,
-        expected: [1, 2, 3],
-        applied: [1, 2, 3],
+        expected: [1, 2, 3, 4],
+        applied: [1, 2, 3, 4],
         pending: []
       });
       database.migrate();
-      expect(database.getMigrationStatus().applied).toEqual([1, 2, 3]);
+      expect(database.getMigrationStatus().applied).toEqual([1, 2, 3, 4]);
     } finally {
       database.close();
     }
@@ -66,7 +66,7 @@ describe('database lifecycle', () => {
     const migrated = new DatabaseService(path);
     try {
       expect(migrated.getEmailAccountById('legacy')?.provider).toBe('gmail');
-      expect(migrated.getMigrationStatus()).toMatchObject({ ready: true, applied: [1, 2, 3] });
+      expect(migrated.getMigrationStatus()).toMatchObject({ ready: true, applied: [1, 2, 3, 4] });
       migrated.upsertEmailAccount({
         id: 'agentmail', provider: 'agentmail', emailAddress: 'agent@agentmail.to',
         displayName: 'Agent', enabled: true,

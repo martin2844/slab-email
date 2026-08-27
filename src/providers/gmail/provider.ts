@@ -241,6 +241,7 @@ export class GmailProvider implements Provider {
 
   private buildQuery(input: MessageSearchParams): string {
     const parts: string[] = [];
+    if (input.inboundOnly) parts.push('in:inbox');
     if (input.query) parts.push(input.query);
     if (input.from) parts.push(`from:${input.from}`);
     if (input.to) parts.push(`to:${input.to}`);

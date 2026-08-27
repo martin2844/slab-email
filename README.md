@@ -123,6 +123,7 @@ Required / relevant environment variables:
 - `MICROSOFT_REDIRECT_URI` (default `http://127.0.0.1:6981/api/oauth/microsoft/callback`)
 - `MICROSOFT_TENANT` (default `common`)
 - `MAX_SENDS_PER_ACCOUNT_PER_HOUR` (default `60`)
+- `INBOUND_POLL_INTERVAL_SECONDS` (default `30`; `0` disables inbound discovery)
 - `MCP_ALLOWED_ORIGINS` (comma-separated)
 - `MCP_ALLOWED_ORIGINS_HOSTS` (comma-separated)
 - `PUBLIC_ADMIN_ALLOWED_ORIGINS` (comma-separated)
@@ -238,6 +239,9 @@ See [docs/mcp.md](docs/mcp.md) for tool payloads and usage.
 - `access_profiles` + `access_profile_accounts`.
 - `access_tokens`: hashed connector tokens.
 - `send_operations`: status + audit fields and `idempotency_key`.
+- `inbound_seen_messages`: per-account message IDs used for durable deduplication.
+- `inbound_events`: append-only metadata notifications for newly discovered mail.
+- `inbound_poll_state`: baseline, checkpoint, and last-error state per account.
 
 See [docs/architecture.md](docs/architecture.md).
 
@@ -274,7 +278,8 @@ Domain tests cover:
 ## Limitations (MVP)
 
 - No attachments support.
-- No mailbox sync engine, local full-text search index, or webhook push sync.
+- No mailbox replication, local full-text search index, or webhook push sync. A bounded
+  metadata-only poller emits durable notifications for new inbound mail.
 - No batching/outbound campaign workflows.
 - No webmail UI in this service.
 

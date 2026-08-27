@@ -29,6 +29,7 @@ describe('runtime config', () => {
     expect(config.adminKey).toBe('file-admin-key');
     expect(config.masterKey).toEqual(Buffer.from(masterKey, 'hex'));
     expect(config.skipMigrations).toBe(true);
+    expect(config.inboundPollIntervalMs).toBe(30_000);
   });
 
   it('rejects ambiguous or unreadable secret sources', () => {
@@ -50,5 +51,15 @@ describe('runtime config', () => {
         SLAB_EMAIL_MASTER_KEY: masterKey
       })
     ).toThrow('SLAB_EMAIL_ADMIN_KEY_FILE could not be read');
+  });
+
+  it('supports disabling the inbound poller', () => {
+    const config = loadConfig({
+      SLAB_EMAIL_ADMIN_KEY: 'direct-admin-key',
+      SLAB_EMAIL_MASTER_KEY: masterKey,
+      INBOUND_POLL_INTERVAL_SECONDS: '0'
+    });
+
+    expect(config.inboundPollIntervalMs).toBe(0);
   });
 });

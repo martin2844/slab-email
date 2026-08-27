@@ -37,6 +37,7 @@ import { hashText } from './config/env.js';
 import { buildOriginMatcher, isOriginAllowed } from './utils/origin.js';
 import { createMcpServer, createMcpTools } from './mcp/server.js';
 import type { ManagedProtonBridge } from './services/proton-bridge-manager.js';
+import type { InboundEventService } from './services/inbound-event-service.js';
 
 export interface AppContext {
   config: RuntimeConfig;
@@ -44,6 +45,7 @@ export interface AppContext {
   accountService: AccountService;
   accessProfileService: AccessProfileService;
   mailService: MailService;
+  inboundEventService: InboundEventService;
   logger: Logger;
   managedProtonBridge?: ManagedProtonBridge;
 }
@@ -502,6 +504,39 @@ export const createApp = (ctx: AppContext): express.Express => {
     const tokenId = safeParam(req.params as Record<string, string | string[]>, 'tokenId');
     ctx.accessProfileService.revokeToken(profileId, tokenId);
     res.status(204).send();
+  });
+
+  adminRouter.get('/inbound/events', adminAuth, (req, res, next) => {
+    try {
+      const query = z
+        .object({
+          after: z.coerce.number().int().nonnegative().optional(),
+          accountId: z.string().uuid().optional(),
+          limit: z.coerce.number().int().min(1).max(100).optional()
+        })
+        .parse(normalizeQuery(req.query));
+      res.status(200).json(
+        ctx.db.listInboundEvents({
+          afterId: query.after,
+          accountId: query.accountId,
+          limit: query.limit
+        })
+      );
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  adminRouter.get('/inbound/status', adminAuth, (_req, res) => {
+    res.status(200).json({ accounts: ctx.db.listInboundPollStates() });
+  });
+
+  adminRouter.post('/inbound/poll', adminAuth, async (_req, res, next) => {
+    try {
+      res.status(200).json(await ctx.inboundEventService.pollNow());
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.use('/api', adminRouter);

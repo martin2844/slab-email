@@ -13,6 +13,7 @@ import { AccessProfileService } from '../src/services/access-profile-service.js'
 import { AccountService } from '../src/services/account-service.js';
 import { MailService } from '../src/services/mail-service.js';
 import type { ManagedProtonBridge } from '../src/services/proton-bridge-manager.js';
+import { InboundEventService } from '../src/services/inbound-event-service.js';
 
 export interface TestContext {
   config: RuntimeConfig & { databasePath: string };
@@ -21,6 +22,7 @@ export interface TestContext {
   accountService: AccountService;
   accessProfileService: AccessProfileService;
   mailService: MailService;
+  inboundEventService: InboundEventService;
   cleanup: () => void;
   cryptoService: EncryptionService;
   managedProtonBridge?: ManagedProtonBridge;
@@ -52,6 +54,7 @@ export const createTestContext = (
     microsoftTenant: 'common',
     logLevel: 'error',
     maxSendsPerAccountPerHour: 20,
+    inboundPollIntervalMs: 0,
     mcpAllowedOrigins: ['127.0.0.1:6981'],
     mcpAllowedHostnames: ['127.0.0.1'],
     publicAdminAllowedOrigins: ['127.0.0.1:6981'],
@@ -77,6 +80,12 @@ export const createTestContext = (
   const accountService = new AccountService({ db, cryptoService, config });
   const accessProfileService = new AccessProfileService(db);
   const mailService = new MailService(accountService, db, config);
+  const inboundEventService = new InboundEventService(
+    accountService,
+    db,
+    logger,
+    config.inboundPollIntervalMs
+  );
   const managedProtonBridge = options.managedProtonBridgeFactory?.(accountService);
   const app = createApp({
     config,
@@ -84,6 +93,7 @@ export const createTestContext = (
     accountService,
     accessProfileService,
     mailService,
+    inboundEventService,
     logger,
     managedProtonBridge
   });
@@ -109,6 +119,7 @@ export const createTestContext = (
     accountService,
     accessProfileService,
     mailService,
+    inboundEventService,
     managedProtonBridge,
     cleanup
   };
