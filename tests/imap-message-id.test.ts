@@ -1,15 +1,23 @@
 import { describe, expect, it } from 'vitest';
+import { EventEmitter } from 'node:events';
 
 import {
   assertImapMessageIdentity,
   formatImapConnectionFingerprint,
   formatImapIdentityEpoch,
   formatImapMessageId,
+  guardImapClientErrors,
   paginateImapUids,
   parseImapMessageId
 } from '../src/providers/imap-smtp/generic.js';
 
 describe('IMAP durable message identity', () => {
+  it('absorbs late IMAP socket errors after a command has already failed', () => {
+    const client = guardImapClientErrors(new EventEmitter());
+
+    expect(() => client.emit('error', new Error('Socket timeout'))).not.toThrow();
+  });
+
   it('qualifies UIDs by mailbox UIDVALIDITY', () => {
     expect(formatImapMessageId(41n, 7)).toBe('41:7');
     expect(formatImapMessageId(42n, 7)).toBe('42:7');

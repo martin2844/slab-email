@@ -6,6 +6,8 @@ import type { EmailMessageCompact } from '../src/types/models.js';
 import { DatabaseService } from '../src/db/database.js';
 import { createFakeProvider } from './fakes.js';
 import { createTestContext } from './helpers.js';
+import { InboundEventService } from '../src/services/inbound-event-service.js';
+import { Logger } from '../src/utils/logger.js';
 
 const accountAddress = 'automation@example.com';
 
@@ -127,6 +129,28 @@ describe('durable inbound email events', () => {
       failed: 0
     });
     expect(context.db.listInboundEvents({ afterId: 2 }).items).toEqual([]);
+  });
+
+  it('does not poll accounts that are temporarily unavailable upstream', async () => {
+    const provider = createFakeProvider();
+    const search = vi.spyOn(provider, 'searchMessages');
+    vi.spyOn(context.accountService, 'getProviderForAccount').mockResolvedValue(provider);
+    const service = new InboundEventService(
+      context.accountService,
+      context.db,
+      new Logger('error'),
+      0,
+      () => false
+    );
+
+    await expect(service.pollNow()).resolves.toEqual({
+      accounts: 0,
+      discovered: 0,
+      emitted: 0,
+      failed: 0,
+      deferred: 0
+    });
+    expect(search).not.toHaveBeenCalled();
   });
 
   it('preserves the live-mail boundary across cosmetic and SMTP-only edits', async () => {

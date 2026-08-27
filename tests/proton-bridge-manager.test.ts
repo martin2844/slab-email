@@ -55,6 +55,46 @@ describe('managed Proton Bridge module', () => {
     ctx?.cleanup();
   });
 
+  it('exposes managed mailbox polling only while Bridge is connected', async () => {
+    ctx = createTestContext();
+    ctx.accountService.upsertManagedProtonBridgeAccount({
+      emailAddress: 'owner@pm.me',
+      displayName: 'Owner',
+      imapHost: '127.0.0.1',
+      imapPort: 1143,
+      imapTlsMode: 'starttls',
+      smtpHost: '127.0.0.1',
+      smtpPort: 1025,
+      smtpTlsMode: 'starttls',
+      username: 'owner@pm.me',
+      password: 'bridge-password',
+      customTls: true,
+      managedBridgeLogin: 'owner@pm.me'
+    });
+    const controller = new FakeController();
+    controller.responses.push(
+      {
+        state: 'ready',
+        accounts: [{ emailAddress: 'owner', state: 'signed out' }]
+      },
+      {
+        state: 'ready',
+        accounts: [{ emailAddress: 'owner', state: 'connected' }]
+      }
+    );
+    const bridge = new ManagedProtonBridge({
+      controller,
+      accountService: ctx.accountService,
+      available: true,
+      version: '3.26.0'
+    });
+
+    await bridge.startIfConfigured();
+    expect(bridge.canPollManagedAccounts()).toBe(false);
+    await bridge.status();
+    expect(bridge.canPollManagedAccounts()).toBe(true);
+  });
+
   it('persists only generated Bridge credentials after a direct login', async () => {
     ctx = createTestContext();
     const controller = new FakeController();

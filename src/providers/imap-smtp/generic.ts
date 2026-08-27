@@ -29,6 +29,18 @@ const SEARCH_DEFAULT_LIMIT = 20;
 const SEARCH_MAX_LIMIT = 100;
 const SNIPPET_MAX = 340;
 
+type ImapErrorEmitter = {
+  on(event: 'error', listener: (error: Error) => void): unknown;
+};
+
+export const guardImapClientErrors = <T extends ImapErrorEmitter>(client: T): T => {
+  // ImapFlow emits socket failures in addition to rejecting the active command.
+  // Without an error listener, a late timeout becomes an uncaught EventEmitter
+  // error and terminates the whole connector process.
+  client.on('error', () => undefined);
+  return client;
+};
+
 export const formatImapMessageId = (
   uidValidity: bigint | string,
   uid: number,
@@ -349,7 +361,7 @@ export class GenericImapSmtpProvider implements Provider {
       disableAutoIdle: true
     };
 
-    return new ImapFlow(options);
+    return guardImapClientErrors(new ImapFlow(options));
   }
 
   private buildSmtpTransport(): Transporter {

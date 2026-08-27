@@ -90,12 +90,15 @@ type PendingSetup = {
 
 export class ManagedProtonBridge {
   private started = false;
+  private upstreamConnected = false;
+  private setupActive = false;
   private readonly pending = new Map<string, PendingSetup>();
 
   constructor(private readonly deps: ManagedProtonBridgeDependencies) {}
 
   async status(): Promise<ManagedProtonBridgeStatus> {
     if (!this.deps.available) {
+      this.upstreamConnected = false;
       return {
         available: false,
         version: this.deps.version,
@@ -105,6 +108,7 @@ export class ManagedProtonBridge {
       };
     }
     if (!this.started) {
+      this.upstreamConnected = false;
       const accounts = this.deps.accountService.listAccounts()
         .filter(
           (account) =>
@@ -125,6 +129,9 @@ export class ManagedProtonBridge {
       if (result.state !== 'ready' && result.state !== 'starting' && result.state !== 'error') {
         throw new Error('Unexpected Proton Bridge status response');
       }
+      this.upstreamConnected = (result.accounts ?? []).some(
+        ({ state }) => state.toLowerCase() === 'connected'
+      );
       return {
         available: true,
         version: this.deps.version,
@@ -133,6 +140,7 @@ export class ManagedProtonBridge {
         accounts: result.accounts ?? []
       };
     } catch (error) {
+      this.upstreamConnected = false;
       return {
         available: true,
         version: this.deps.version,
@@ -149,16 +157,22 @@ export class ManagedProtonBridge {
     password: string;
   }): Promise<ManagedProtonSetupResult> {
     this.assertAvailable();
-    await this.ensureStarted();
-    const result = await this.callController('connect', {
-      emailAddress: input.emailAddress,
-      password: input.password
-    });
-    return this.handleSetupResult(result, {
-      emailAddress: input.emailAddress,
-      displayName: input.displayName,
-      expiresAt: Date.now() + 10 * 60 * 1000
-    });
+    this.setupActive = true;
+    try {
+      await this.ensureStarted();
+      const result = await this.callController('connect', {
+        emailAddress: input.emailAddress,
+        password: input.password
+      });
+      return this.handleSetupResult(result, {
+        emailAddress: input.emailAddress,
+        displayName: input.displayName,
+        expiresAt: Date.now() + 10 * 60 * 1000
+      });
+    } catch (error) {
+      this.setupActive = false;
+      throw error;
+    }
   }
 
   async continueLogin(input: {
@@ -169,6 +183,7 @@ export class ManagedProtonBridge {
     const pending = this.pending.get(input.challengeId);
     if (!pending || pending.expiresAt <= Date.now()) {
       this.pending.delete(input.challengeId);
+      this.setupActive = false;
       throw new ApiError(ERROR_CODES.STATE_EXPIRED, 'Proton Bridge setup session expired', 409);
     }
     await this.ensureStarted();
@@ -180,9 +195,13 @@ export class ManagedProtonBridge {
   }
 
   async abort(challengeId: string): Promise<void> {
-    if (!this.deps.available || !this.started) return;
-    await this.callController('abort', { challengeId });
-    this.pending.delete(challengeId);
+    try {
+      if (!this.deps.available || !this.started) return;
+      await this.callController('abort', { challengeId });
+      this.pending.delete(challengeId);
+    } finally {
+      this.setupActive = false;
+    }
   }
 
   async remove(emailAddress: string): Promise<void> {
@@ -343,11 +362,20 @@ export class ManagedProtonBridge {
         'managedBridge' in account.config &&
         account.config.managedBridge === true
     );
-    if (configured) await this.ensureStarted();
+    if (configured) {
+      await this.ensureStarted();
+      await this.status();
+    }
+  }
+
+  canPollManagedAccounts(): boolean {
+    return this.upstreamConnected && !this.setupActive;
   }
 
   async shutdown(): Promise<void> {
     this.started = false;
+    this.upstreamConnected = false;
+    this.setupActive = false;
     this.pending.clear();
     await this.deps.controller.stop();
   }
@@ -357,6 +385,7 @@ export class ManagedProtonBridge {
     setup: PendingSetup
   ): ManagedProtonSetupResult {
     if (result.state === 'challenge_required') {
+      this.setupActive = true;
       this.pending.set(result.challengeId, {
         ...setup,
         expiresAt: Date.parse(result.expiresAt)
@@ -374,6 +403,8 @@ export class ManagedProtonBridge {
       if (pending.emailAddress === setup.emailAddress) this.pending.delete(challengeId);
     }
     const mailbox = result.mailbox;
+    this.upstreamConnected = true;
+    this.setupActive = false;
     const account = this.deps.accountService.upsertManagedProtonBridgeAccount({
       emailAddress: mailbox.emailAddress,
       displayName: setup.displayName,

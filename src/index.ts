@@ -12,6 +12,7 @@ import { MailService } from './services/mail-service.js';
 import { ManagedProtonBridge } from './services/proton-bridge-manager.js';
 import { PythonProtonBridgeController } from './proton/controller.js';
 import { InboundEventService } from './services/inbound-event-service.js';
+import type { ImapSmtpAccountConfig } from './types/models.js';
 
 const setup = (config: RuntimeConfig) => {
   const logger = new Logger(config.logLevel);
@@ -20,12 +21,6 @@ const setup = (config: RuntimeConfig) => {
   const accountService = new AccountService({ db, cryptoService: crypto, config });
   const accessProfileService = new AccessProfileService(db);
   const mailService = new MailService(accountService, db, config);
-  const inboundEventService = new InboundEventService(
-    accountService,
-    db,
-    logger,
-    config.inboundPollIntervalMs
-  );
   const managedProtonBridge = new ManagedProtonBridge({
     controller: new PythonProtonBridgeController({
       pythonBinary: config.protonBridgePython,
@@ -40,6 +35,16 @@ const setup = (config: RuntimeConfig) => {
       isExecutable(config.protonBridgePython),
     version: config.protonBridgeVersion
   });
+  const inboundEventService = new InboundEventService(
+    accountService,
+    db,
+    logger,
+    config.inboundPollIntervalMs,
+    (account) =>
+      account.provider !== 'proton_bridge' ||
+      (account.config as ImapSmtpAccountConfig).managedBridge !== true ||
+      managedProtonBridge.canPollManagedAccounts()
+  );
 
   const app = createApp({
     config,

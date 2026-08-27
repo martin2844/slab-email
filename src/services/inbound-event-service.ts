@@ -6,7 +6,11 @@ import {
   InboundScanStateChangedError
 } from '../db/database.js';
 import { Logger } from '../utils/logger.js';
-import type { EmailMessageCompact, InboundPollState } from '../types/models.js';
+import type {
+  AccountRecord,
+  EmailMessageCompact,
+  InboundPollState
+} from '../types/models.js';
 
 const PAGE_SIZE = 100;
 const MAX_PAGES_PER_POLL = 50;
@@ -28,7 +32,8 @@ export class InboundEventService {
     private readonly accountService: AccountService,
     private readonly db: DatabaseService,
     private readonly logger: Logger,
-    private readonly intervalMs: number
+    private readonly intervalMs: number,
+    private readonly shouldPollAccount: (account: AccountRecord) => boolean = () => true
   ) {}
 
   start(): void {
@@ -75,7 +80,13 @@ export class InboundEventService {
   private async runPoll(): Promise<InboundPollResult> {
     const accounts = this.accountService
       .listAccounts()
-      .filter((account) => account.enabled && account.capabilities.read && account.capabilities.search);
+      .filter(
+        (account) =>
+          account.enabled &&
+          account.capabilities.read &&
+          account.capabilities.search &&
+          this.shouldPollAccount(account)
+      );
     const result: InboundPollResult = {
       accounts: accounts.length,
       discovered: 0,
