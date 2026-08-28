@@ -3,13 +3,59 @@ import { EventEmitter } from 'node:events';
 
 import {
   assertImapMessageIdentity,
+  buildImapThreadId,
+  buildImapReplyReferences,
   formatImapConnectionFingerprint,
   formatImapIdentityEpoch,
   formatImapMessageId,
+  formatSyntheticImapMessageId,
   guardImapClientErrors,
   paginateImapUids,
   parseImapMessageId
 } from '../src/providers/imap-smtp/generic.js';
+
+describe('IMAP conversation identity', () => {
+  it('uses the original RFC message id for an initial message and its replies', () => {
+    const root = '<root-message@example.com>';
+
+    expect(buildImapThreadId(null, [], root)).toBe(root);
+    expect(buildImapThreadId(root, [], '<reply@example.com>')).toBe(root);
+    expect(
+      buildImapThreadId(
+        '<second@example.com>',
+        [root, '<second@example.com>'],
+        '<third@example.com>'
+      )
+    ).toBe(root);
+  });
+
+  it('falls back to the provider identity when RFC headers are absent', () => {
+    const synthetic = formatSyntheticImapMessageId('41:7');
+    expect(synthetic).toMatch(/^<[a-f0-9]{32}@slab-email\.invalid>$/);
+    expect(buildImapThreadId(null, [], synthetic)).toBe(synthetic);
+    expect(formatSyntheticImapMessageId('41:7')).toBe(synthetic);
+  });
+
+  it('preserves root-first RFC ancestry when replying to a reply', () => {
+    const root = '<root@example.com>';
+    const parent = '<parent@example.com>';
+
+    expect(
+      buildImapReplyReferences({
+        references: [],
+        inReplyTo: root,
+        messageId: parent
+      })
+    ).toEqual([root, parent]);
+    expect(
+      buildImapReplyReferences({
+        references: [root, parent],
+        inReplyTo: parent,
+        messageId: '<child@example.com>'
+      })
+    ).toEqual([root, parent, '<child@example.com>']);
+  });
+});
 
 describe('IMAP durable message identity', () => {
   it('absorbs late IMAP socket errors after a command has already failed', () => {

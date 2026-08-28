@@ -172,9 +172,37 @@ const normalizeDomain = (value: string): string => {
   return at === -1 ? 'localhost' : value.slice(at + 1);
 };
 
-const buildThreadId = (inReplyTo?: string | null, references?: string[]): string | null => {
+export const buildImapThreadId = (
+  inReplyTo?: string | null,
+  references?: string[],
+  messageId?: string | null
+): string | null => {
   if (references && references.length > 0) return references[0];
-  return inReplyTo ?? null;
+  return inReplyTo ?? messageId ?? null;
+};
+
+export const formatSyntheticImapMessageId = (
+  providerIdentity: string
+): string => {
+  const digest = crypto
+    .createHash('sha256')
+    .update(providerIdentity)
+    .digest('hex')
+    .slice(0, 32);
+  return `<${digest}@slab-email.invalid>`;
+};
+
+export const buildImapReplyReferences = (input: {
+  references?: string[];
+  inReplyTo?: string | null;
+  messageId: string;
+}): string[] => {
+  const ancestry = input.references?.length
+    ? input.references
+    : input.inReplyTo
+      ? [input.inReplyTo]
+      : [];
+  return [...new Set([...ancestry, input.messageId].filter(Boolean))];
 };
 
 interface ParsedMessageSource {
@@ -498,11 +526,22 @@ export class GenericImapSmtpProvider implements Provider {
           if (!fetched) continue;
 
           const parsed = fetched.parsed;
+          const providerIdentity = formatImapMessageId(
+            uidValidity,
+            uid,
+            connectionFingerprint
+          );
+          const rfcMessageId =
+            parsed.messageId ?? formatSyntheticImapMessageId(providerIdentity);
           const snippet = clampText(firstTextOrBody(parsed.text, parsed.html), SNIPPET_MAX);
           items.push({
-            id: formatImapMessageId(uidValidity, uid, connectionFingerprint),
+            id: providerIdentity,
             accountId: '',
-            threadId: buildThreadId(parsed.inReplyTo, parsed.references),
+            threadId: buildImapThreadId(
+              parsed.inReplyTo,
+              parsed.references,
+              rfcMessageId
+            ),
             from: parsed.from[0] ?? { address: '' },
             to: parsed.to,
             subject: parsed.subject,
@@ -566,17 +605,24 @@ export class GenericImapSmtpProvider implements Provider {
         }
 
         const parsed = fetched.parsed;
+        const providerIdentity = formatImapMessageId(
+          uidValidity,
+          uid,
+          connectionFingerprint
+        );
+        const rfcMessageId =
+          parsed.messageId ?? formatSyntheticImapMessageId(providerIdentity);
         const body = firstTextOrBody(parsed.text, parsed.html);
         return {
-          id: formatImapMessageId(uidValidity, uid, connectionFingerprint),
+          id: providerIdentity,
           accountId,
           provider: 'imap_smtp',
-          threadId: buildThreadId(parsed.inReplyTo, parsed.references),
-          messageId: parsed.messageId ?? formatImapMessageId(
-            uidValidity,
-            uid,
-            connectionFingerprint
+          threadId: buildImapThreadId(
+            parsed.inReplyTo,
+            parsed.references,
+            rfcMessageId
           ),
+          messageId: rfcMessageId,
           inReplyTo: parsed.inReplyTo,
           references: parsed.references,
           from: parsed.from[0] ?? { address: '' },
@@ -658,7 +704,11 @@ export class GenericImapSmtpProvider implements Provider {
       return {
         status: 'sent',
         providerMessageId: GenericImapSmtpProvider.parseMessageId(info),
-        providerThreadId: payload.inReplyTo ?? null
+        providerThreadId: buildImapThreadId(
+          payload.inReplyTo,
+          payload.references,
+          messageId
+        )
       };
     } catch (error) {
       if (GenericImapSmtpProvider.isRetryAmbiguous(error)) {
@@ -685,7 +735,13 @@ export class GenericImapSmtpProvider implements Provider {
     const requestedTo = input.to?.length ? input.to : [original.from];
     const to = input.replyAll ? normalizeAddressList([...(input.to ?? [original.from]), ...original.to, ...(original.cc ?? [])]) : requestedTo;
     const cc = input.replyAll ? normalizeAddressList([...original.to, ...original.cc]) : [];
-    const refs = [...(original.references ?? []), original.messageId, original.inReplyTo].filter(Boolean) as string[];
+    const originalMessageId =
+      original.messageId ?? formatSyntheticImapMessageId(original.id);
+    const refs = buildImapReplyReferences({
+      references: original.references,
+      inReplyTo: original.inReplyTo,
+      messageId: originalMessageId
+    });
     const subject = original.subject.toLowerCase().startsWith('re:') ? original.subject : `Re: ${original.subject}`;
 
     return this.sendRawPayload({
@@ -694,7 +750,7 @@ export class GenericImapSmtpProvider implements Provider {
       subject,
       text: input.text,
       html: input.html,
-      inReplyTo: original.messageId ?? original.id,
+      inReplyTo: originalMessageId,
       references: refs,
       idempotencyKey: input.idempotencyKey
     });
