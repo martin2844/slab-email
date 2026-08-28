@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+import { createHash } from 'node:crypto';
 
 import { createFakeProvider } from './fakes.js';
 import { createTestContext } from './helpers.js';
@@ -301,11 +302,23 @@ describe('MCP endpoint', () => {
     const token = (
       await request(ctx.app).post(`/api/access-profiles/${profile.body.id}/tokens`).set('Authorization', `Bearer ${ctx.config.adminKey}`).expect(201)
     ).body.token;
-    const call = async (id: number, name: string, args: Record<string, unknown>) => {
-      const response = await request(ctx.app)
+    const call = async (
+      id: number,
+      name: string,
+      args: Record<string, unknown>,
+      workflowTarget?: { accountId: string; messageId: string }
+    ) => {
+      let pending = request(ctx.app)
         .post('/mcp')
         .set('Authorization', `Bearer ${token}`)
-        .set('Accept', 'application/json, text/event-stream')
+        .set('Accept', 'application/json, text/event-stream');
+      if (workflowTarget) {
+        const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+        pending = pending
+          .set('X-Slab-Reply-Account-Sha256', digest(workflowTarget.accountId))
+          .set('X-Slab-Reply-Message-Sha256', digest(workflowTarget.messageId));
+      }
+      const response = await pending
         .send({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } })
         .expect(200);
       return parseMcpStreamResponse(response.text);
@@ -386,20 +399,105 @@ describe('MCP endpoint', () => {
     });
     expect(provider.replyToMessage).not.toHaveBeenCalled();
 
-    const sent = await call(24, 'email_reply', {
-      accountId: account.body.id,
-      expectedFrom: 'clara@clasific.ar',
-      messageId: 'message-1',
-      to: ['from@example.com'],
-      expectedSubject: 'Re: hello',
-      text: 'Reply body',
-      idempotencyKey: 'reply-exact'
+    const readsBeforeWorkflowMismatch = vi.mocked(provider.getMessage).mock.calls.length;
+    const wrongWorkflowTarget = await call(
+      24,
+      'email_reply',
+      {
+        accountId: account.body.id,
+        expectedFrom: 'clara@clasific.ar',
+        messageId: 'message-2',
+        to: ['from@example.com'],
+        expectedSubject: 'Re: hello',
+        text: 'Reply body',
+        idempotencyKey: 'wrong-workflow-target'
+      },
+      { accountId: account.body.id, messageId: 'message-1' }
+    );
+    expect(wrongWorkflowTarget.result.structuredContent).toMatchObject({
+      code: 'WORKFLOW_TARGET_MISMATCH'
     });
+    expect(wrongWorkflowTarget.result.isError).toBe(true);
+    expect(vi.mocked(provider.getMessage).mock.calls).toHaveLength(
+      readsBeforeWorkflowMismatch
+    );
+    expect(provider.replyToMessage).not.toHaveBeenCalled();
+
+    const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+    const batchMismatch = await request(ctx.app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${token}`)
+      .set('Accept', 'application/json, text/event-stream')
+      .set('X-Slab-Reply-Account-Sha256', digest(account.body.id))
+      .set('X-Slab-Reply-Message-Sha256', digest('message-1'))
+      .send([
+        {
+          jsonrpc: '2.0',
+          id: 250,
+          method: 'tools/call',
+          params: {
+            name: 'email_reply',
+            arguments: {
+              accountId: account.body.id,
+              expectedFrom: 'clara@clasific.ar',
+              messageId: 'message-2',
+              to: ['from@example.com'],
+              expectedSubject: 'Re: hello',
+              text: 'Reply body',
+              idempotencyKey: 'batch-workflow-mismatch'
+            }
+          }
+        }
+      ])
+      .expect(200);
+    expect(batchMismatch.text).toContain('WORKFLOW_TARGET_MISMATCH');
+    expect(vi.mocked(provider.getMessage).mock.calls).toHaveLength(
+      readsBeforeWorkflowMismatch
+    );
+    expect(provider.replyToMessage).not.toHaveBeenCalled();
+
+    const wrongWorkflowAccount = await call(
+      25,
+      'email_reply',
+      {
+        accountId: 'another-account',
+        expectedFrom: 'clara@clasific.ar',
+        messageId: 'message-1',
+        to: ['from@example.com'],
+        expectedSubject: 'Re: hello',
+        text: 'Reply body',
+        idempotencyKey: 'wrong-workflow-account'
+      },
+      { accountId: account.body.id, messageId: 'message-1' }
+    );
+    expect(wrongWorkflowAccount.result.structuredContent).toMatchObject({
+      code: 'WORKFLOW_TARGET_MISMATCH'
+    });
+    expect(wrongWorkflowAccount.result.isError).toBe(true);
+    expect(vi.mocked(provider.getMessage).mock.calls).toHaveLength(
+      readsBeforeWorkflowMismatch
+    );
+    expect(provider.replyToMessage).not.toHaveBeenCalled();
+
+    const sent = await call(
+      26,
+      'email_reply',
+      {
+        accountId: account.body.id,
+        expectedFrom: 'clara@clasific.ar',
+        messageId: 'message-1',
+        to: ['from@example.com'],
+        expectedSubject: 'Re: hello',
+        text: 'Reply body',
+        idempotencyKey: 'reply-exact'
+      },
+      { accountId: account.body.id, messageId: 'message-1' }
+    );
     expect(sent.result.structuredContent).toMatchObject({ status: 'sent' });
     expect(provider.replyToMessage).toHaveBeenCalledTimes(1);
     const readsBeforeRetry = vi.mocked(provider.getMessage).mock.calls.length;
     vi.mocked(provider.getMessage).mockRejectedValueOnce(new Error('source unavailable'));
-    const retried = await call(25, 'email_reply', {
+    const retried = await call(27, 'email_reply', {
       accountId: account.body.id,
       expectedFrom: 'clara@clasific.ar',
       messageId: 'message-1',

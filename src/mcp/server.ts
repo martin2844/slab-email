@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
 import { AuthenticatedRequest } from '../middleware/auth.js';
@@ -48,6 +49,7 @@ const toolError = (error: unknown) => {
       : undefined;
   const detail = safeDetails ? JSON.stringify(safeDetails) : undefined;
   return {
+    isError: true,
     content: textContent(detail ? `${normalized} ${detail}` : normalized),
     structuredContent: asStructuredContent({
       error: sanitizeError(error),
@@ -81,6 +83,28 @@ const ensureArray = (value: unknown): string[] | undefined => {
     .map((entry) => String(entry).trim().toLowerCase())
     .filter(Boolean)
     .filter((entry) => entry.length > 0);
+};
+
+const assertWorkflowReplyTarget = (
+  req: AuthenticatedRequest,
+  input: { accountId: string; messageId: string }
+) => {
+  const accountHash = req.header('x-slab-reply-account-sha256');
+  const messageHash = req.header('x-slab-reply-message-sha256');
+  if (accountHash === undefined && messageHash === undefined) return;
+  const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+  if (
+    !accountHash ||
+    !messageHash ||
+    digest(input.accountId) !== accountHash ||
+    digest(input.messageId) !== messageHash
+  ) {
+    throw new ApiError(
+      ERROR_CODES.WORKFLOW_TARGET_MISMATCH,
+      'email_reply must target the inbound account and message fixed at workflow start',
+      403
+    );
+  }
 };
 
 const searchInputSchema = z.object({
@@ -346,6 +370,11 @@ export const createMcpTools = (
       },
       async (rawArgs, _extra) => {
         const args = replyInputSchema.parse(rawArgs);
+        try {
+          assertWorkflowReplyTarget(req, args);
+        } catch (error) {
+          return toolError(error);
+        }
         if (!args.idempotencyKey) {
           return toolError(new ApiError(ERROR_CODES.INVALID_INPUT, 'idempotencyKey is required for email_reply', 400));
         }

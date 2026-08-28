@@ -54,6 +54,27 @@ const toJsonError = (error: ApiError): Record<string, unknown> => ({
   error: ApiErrorPayload(error)
 });
 
+const sendMcpToolError = (
+  res: Response,
+  requestId: unknown,
+  code: string,
+  message: string
+) => {
+  const payload = {
+    jsonrpc: '2.0',
+    id: requestId ?? null,
+    result: {
+      isError: true,
+      content: [{ type: 'text', text: `${code}: ${message}` }],
+      structuredContent: { code, error: message }
+    }
+  };
+  res
+    .status(200)
+    .type('text/event-stream')
+    .send(`event: message\ndata: ${JSON.stringify(payload)}\n\n`);
+};
+
 const toHttpError = (error: unknown): { status: number; body: Record<string, unknown> } => {
   if (error instanceof ApiError) {
     return { status: error.status, body: toJsonError(error) };
@@ -678,27 +699,12 @@ export const createApp = (ctx: AppContext): express.Express => {
         !profile?.draftEnabled &&
         !profile?.sendEnabled);
     if (deniedCapability) {
-      const payload = {
-        jsonrpc: '2.0',
-        id: req.body?.id ?? null,
-        result: {
-          isError: true,
-          content: [
-            {
-              type: 'text',
-              text: 'PERMISSION_DENIED: tool is not enabled for this access profile'
-            }
-          ],
-          structuredContent: {
-            code: ERROR_CODES.PERMISSION_DENIED,
-            error: 'tool is not enabled for this access profile'
-          }
-        }
-      };
-      res
-        .status(200)
-        .type('text/event-stream')
-        .send(`event: message\ndata: ${JSON.stringify(payload)}\n\n`);
+      sendMcpToolError(
+        res,
+        req.body?.id,
+        ERROR_CODES.PERMISSION_DENIED,
+        'tool is not enabled for this access profile'
+      );
       return;
     }
     const server = createMcpServer('slab-email', '0.1.0');
