@@ -1,5 +1,7 @@
 # slab-email
 
+[![M8ven Verified](https://m8ven.ai/badge/mcp/martin2844-slab-email-7gu3it?variant=verified)](https://m8ven.ai/mcp/martin2844-slab-email-7gu3it)
+
 Headless email connector for AI agents via REST and MCP.
 
 `slab-email` is a local-first microservice that standardizes mailbox access behind a normalized API and MCP tool surface.
@@ -214,7 +216,6 @@ Tools:
 - `email_search`
 - `email_get_message`
 - `email_list_threads`
-- `email_get_thread`
 - `email_create_draft`
 - `email_send`
 - `email_reply`

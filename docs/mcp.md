@@ -16,8 +16,18 @@ Only scoped connector tokens are accepted (admin token is not valid here).
 
 ## Tool annotations
 
-- Read tools include `readOnlyHint: true`.
-- Send/reply tools include write hints.
+Every tool declares all four MCP safety hints explicitly:
+
+- Account discovery is read-only, idempotent, non-destructive, and closed-world.
+- Mail reads are read-only, idempotent, and non-destructive. They are open-world
+  because messages may contain content from external senders.
+- Draft creation is additive and non-destructive, but not idempotent: repeating a
+  call may create another draft.
+- Send and reply are additive, non-destructive, open-world operations. They are
+  idempotent because both require a caller-provided `idempotencyKey`.
+
+Annotations describe behavior for host UX and retry policy. Access profiles and
+server-side permission checks remain the security boundary.
 
 ## Tool list
 
@@ -49,10 +59,6 @@ Inputs: `accountId`, `threadId`.
 
 Returns thread message list when provider exposes threads.
 
-### `email_get_thread`
-
-Deprecated alias variant in some clients; use `email_list_threads`.
-
 ### `email_create_draft`
 
 Inputs:
@@ -77,8 +83,8 @@ Inputs:
 - `bcc?[]`
 - `subject`
 - `text`
-- `html?`
 - `idempotencyKey` (required)
+- `expectedFrom` (required; exact sender from `email_list_accounts`)
 
 Idempotency is enforced by `(accountId, idempotencyKey)`.
 
@@ -88,11 +94,10 @@ Inputs:
 
 - `accountId`
 - `messageId`
-- `to?[]`
-- `cc?[]`
+- `expectedFrom` (required; exact sender from `email_list_accounts`)
+- `to[]` (required; exactly the original sender from `email_get_message`)
+- `expectedSubject` (required; exact approved reply subject)
 - `text`
-- `html?`
-- `replyAll?`
 - `idempotencyKey` (required)
 
 ## MCP example
@@ -112,4 +117,3 @@ Sample client config:
 
 - MCP output intentionally avoids duplicating large payloads in both content and structured content.
 - Large/unsafe fields (secrets) are never emitted by MCP.
-

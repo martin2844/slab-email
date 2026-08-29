@@ -12,15 +12,30 @@ export interface McpContext {
   accountIds: string[];
 }
 
-const READ_ONLY_TOOL: ToolAnnotations = {
+const ACCOUNT_LIST_TOOL: ToolAnnotations = {
   readOnlyHint: true,
+  destructiveHint: false,
   idempotentHint: true,
   openWorldHint: false
 };
 
-const WRITE_TOOL: ToolAnnotations = {
+const MAIL_READ_TOOL: ToolAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true
+};
+
+const DRAFT_TOOL: ToolAnnotations = {
   readOnlyHint: false,
-  destructiveHint: true,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: true
+};
+
+const DELIVERY_TOOL: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
   idempotentHint: true,
   openWorldHint: true
 };
@@ -124,6 +139,8 @@ const searchInputSchema = z.object({
   cursor: z.string().trim().optional()
 });
 
+const listAccountsInputSchema = z.object({}).strict();
+
 const getMessageInputSchema = z.object({
   accountId: z.string().trim().min(1),
   messageId: z.string().trim().min(1)
@@ -190,9 +207,11 @@ export const createMcpTools = (
       'email_list_accounts',
       {
         description: 'List accounts visible for this access profile',
-        annotations: READ_ONLY_TOOL
+        inputSchema: listAccountsInputSchema,
+        annotations: ACCOUNT_LIST_TOOL
       },
-      async (_extra) => {
+      async (rawArgs, _extra) => {
+        listAccountsInputSchema.parse(rawArgs);
         const accounts = mailService.listAccounts(req).map((account) => ({
           id: account.id,
           email: account.emailAddress,
@@ -225,7 +244,7 @@ export const createMcpTools = (
       {
         description: 'Search messages on a connected account',
         inputSchema: searchInputSchema,
-        annotations: READ_ONLY_TOOL
+        annotations: MAIL_READ_TOOL
       },
       async (rawArgs, _extra) => {
         const args = searchInputSchema.parse(rawArgs);
@@ -258,7 +277,7 @@ export const createMcpTools = (
       {
         description: 'Get message by account and message id',
         inputSchema: getMessageInputSchema,
-        annotations: READ_ONLY_TOOL
+        annotations: MAIL_READ_TOOL
       },
       async (rawArgs, _extra) => {
         const args = getMessageInputSchema.parse(rawArgs);
@@ -280,7 +299,7 @@ export const createMcpTools = (
       {
         description: 'Read all messages for a thread',
         inputSchema: listThreadInputSchema,
-        annotations: READ_ONLY_TOOL
+        annotations: MAIL_READ_TOOL
       },
       async (rawArgs, _extra) => {
         const args = listThreadInputSchema.parse(rawArgs);
@@ -302,7 +321,7 @@ export const createMcpTools = (
       {
         description: 'Create a remote draft message',
         inputSchema: draftInputSchema,
-        annotations: WRITE_TOOL
+        annotations: DRAFT_TOOL
       },
       async (rawArgs, _extra) => {
         const args = draftInputSchema.parse(rawArgs);
@@ -332,7 +351,7 @@ export const createMcpTools = (
       {
         description: 'Send email from the verified account identity. Pass expectedFrom from the latest email_list_accounts result and an idempotencyKey.',
         inputSchema: sendInputSchema,
-        annotations: WRITE_TOOL
+        annotations: DELIVERY_TOOL
       },
       async (rawArgs, _extra) => {
         const args = sendInputSchema.parse(rawArgs);
@@ -366,7 +385,7 @@ export const createMcpTools = (
       {
         description: 'Reply to one verified original sender. Pass expectedFrom from email_list_accounts, and to plus expectedSubject from the latest email_get_message read.',
         inputSchema: replyInputSchema,
-        annotations: WRITE_TOOL
+        annotations: DELIVERY_TOOL
       },
       async (rawArgs, _extra) => {
         const args = replyInputSchema.parse(rawArgs);

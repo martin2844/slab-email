@@ -365,9 +365,9 @@ describe('MCP endpoint', () => {
     expect(provider.getMessage).not.toHaveBeenCalled();
 
     ctx.accessProfileService.update(profile.body.id, {
-      name: 'read-and-send',
+      name: 'all-capabilities',
       readEnabled: true,
-      draftEnabled: false,
+      draftEnabled: true,
       sendEnabled: true,
       accountIds: [account.body.id]
     });
@@ -379,8 +379,69 @@ describe('MCP endpoint', () => {
       .expect(200);
     const readableTools = parseMcpStreamResponse(readableToolsResponse.text).result.tools as Array<{
       name: string;
-      inputSchema?: { properties?: Record<string, unknown> };
+      inputSchema?: { type?: string; properties?: Record<string, unknown> };
+      annotations?: {
+        readOnlyHint?: boolean;
+        destructiveHint?: boolean;
+        idempotentHint?: boolean;
+        openWorldHint?: boolean;
+      };
     }>;
+    const expectedToolAnnotations = {
+      email_list_accounts: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      },
+      email_search: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true
+      },
+      email_get_message: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true
+      },
+      email_list_threads: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true
+      },
+      email_create_draft: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true
+      },
+      email_send: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true
+      },
+      email_reply: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true
+      }
+    } as const;
+    expect(readableTools.map(({ name }) => name).sort()).toEqual(
+      Object.keys(expectedToolAnnotations).sort()
+    );
+    for (const tool of readableTools) {
+      expect(tool.inputSchema, `${tool.name} input schema`).toMatchObject({
+        type: 'object'
+      });
+      expect(tool.annotations, `${tool.name} annotations`).toEqual(
+        expectedToolAnnotations[tool.name as keyof typeof expectedToolAnnotations]
+      );
+    }
     const replyTool = readableTools.find(({ name }) => name === 'email_reply');
     expect(replyTool?.inputSchema?.properties).not.toHaveProperty('html');
     expect(replyTool?.inputSchema?.properties).not.toHaveProperty('replyAll');
