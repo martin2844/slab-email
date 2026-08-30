@@ -516,13 +516,19 @@ const toCompactDate = (raw?: string | number | null): string => {
   return new Date(parsed).toISOString();
 };
 
-const formatProviderError = (error: unknown): ProviderSendResult => {
-  const responseMessage = (error as { response?: { data?: { error?: { message?: string } } } }).response?.data;
-  if (responseMessage?.error?.message) {
-    return { status: 'failed', detail: responseMessage.error.message };
-  }
+export const formatProviderError = (error: unknown): ProviderSendResult => {
+  const response = (error as {
+    response?: { status?: number; data?: { error?: { message?: string } } };
+    message?: string;
+  }).response;
+  const detail = response?.data?.error?.message ?? String(
+    (error as { message?: string }).message ?? error
+  );
+  const rejectedBeforeAcceptance =
+    typeof response?.status === 'number' &&
+    [400, 401, 403, 404, 422, 429].includes(response.status);
   return {
-    status: 'failed',
-    detail: String((error as { message?: string }).message ?? error)
+    status: rejectedBeforeAcceptance ? 'failed' : 'unknown',
+    detail
   };
 };

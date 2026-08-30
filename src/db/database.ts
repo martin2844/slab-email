@@ -801,19 +801,47 @@ export class DatabaseService {
     operation: 'send' | 'reply';
   }): { id: number } | undefined {
     try {
-      const result = this.db
-        .prepare(
-          `
-          INSERT INTO send_operations (account_id, idempotency_key, operation, status, created_at, updated_at)
-          VALUES (?, ?, ?, 'pending', ?, ?)
-          `
-        )
-        .run(input.accountId, input.idempotencyKey, input.operation, nowIso(), nowIso());
-
-      return { id: Number(result.lastInsertRowid) };
+      const create = this.db.transaction(() => {
+        const timestamp = nowIso();
+        const result = this.db
+          .prepare(
+            `
+            INSERT INTO send_operations (account_id, idempotency_key, operation, status, created_at, updated_at)
+            VALUES (?, ?, ?, 'pending', ?, ?)
+            `
+          )
+          .run(input.accountId, input.idempotencyKey, input.operation, timestamp, timestamp);
+        this.db
+          .prepare('INSERT INTO send_attempts (account_id, attempted_at) VALUES (?, ?)')
+          .run(input.accountId, timestamp);
+        return { id: Number(result.lastInsertRowid) };
+      });
+      return create.immediate();
     } catch {
       return undefined;
     }
+  }
+
+  claimFailedSendOperation(operationId: number): boolean {
+    const claim = this.db.transaction(() => {
+      const timestamp = nowIso();
+      const operation = this.db
+        .prepare(
+          `
+          UPDATE send_operations
+          SET status = 'pending', error_code = NULL, updated_at = ?
+          WHERE id = ? AND status = 'failed'
+          RETURNING account_id
+          `
+        )
+        .get(timestamp, operationId) as { account_id: string } | undefined;
+      if (!operation) return false;
+      this.db
+        .prepare('INSERT INTO send_attempts (account_id, attempted_at) VALUES (?, ?)')
+        .run(operation.account_id, timestamp);
+      return true;
+    });
+    return claim.immediate();
   }
 
   getSendOperation(accountId: string, idempotencyKey: string): SendOperationRecord | undefined {
@@ -872,8 +900,8 @@ export class DatabaseService {
       .prepare(
         `
         SELECT COUNT(*) as total
-        FROM send_operations
-        WHERE account_id = ? AND created_at >= ?
+        FROM send_attempts
+        WHERE account_id = ? AND attempted_at >= ?
         `
       )
       .get(accountId, sinceIso) as { total: number };

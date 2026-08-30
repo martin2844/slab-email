@@ -123,4 +123,123 @@ describe('send idempotency', () => {
     expect(second.body.error.code).toBe('SEND_OUTCOME_UNKNOWN');
     expect(fakeProvider.sendMessage).toHaveBeenCalledTimes(1);
   });
+
+  it('retries a confirmed provider failure with the same idempotency key', async () => {
+    const account = await createAccount();
+    const fakeProvider = createFakeProvider({
+      sendResult: { status: 'sent', providerMessageId: 'msg-recovered' }
+    });
+    const sendSpy = vi
+      .spyOn(fakeProvider, 'sendMessage')
+      .mockResolvedValueOnce({ status: 'failed', detail: 'temporary provider failure' });
+    vi.spyOn(ctx.accountService, 'getProviderForAccount')
+      .mockResolvedValue(fakeProvider as never)
+      .mockResolvedValueOnce(fakeProvider as never)
+      .mockRejectedValueOnce(new Error('provider initialization unavailable'));
+
+    const { token } = await createProfileAndToken(ctx, account.body.id, {
+      readEnabled: true,
+      sendEnabled: true,
+      draftEnabled: true
+    });
+    const payload = {
+      accountId: account.body.id,
+      to: ['person@company.com'],
+      subject: 'Retry',
+      text: 'body',
+      idempotencyKey: 'retry-after-failure'
+    };
+
+    await request(ctx.app)
+      .post('/api/mail/send')
+      .set('Authorization', `Bearer ${token}`)
+      .send(payload)
+      .expect(502);
+
+    await request(ctx.app)
+      .post('/api/mail/send')
+      .set('Authorization', `Bearer ${token}`)
+      .send(payload)
+      .expect(500);
+
+    const recovered = await request(ctx.app)
+      .post('/api/mail/send')
+      .set('Authorization', `Bearer ${token}`)
+      .send(payload)
+      .expect(200);
+
+    expect(recovered.body.providerMessageId).toBe('msg-recovered');
+    expect(sendSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats a thrown provider call as ambiguous and never retries it blindly', async () => {
+    const account = await createAccount();
+    const fakeProvider = createFakeProvider({
+      sendResult: { status: 'sent', providerMessageId: 'must-not-send' }
+    });
+    const sendSpy = vi
+      .spyOn(fakeProvider, 'sendMessage')
+      .mockRejectedValueOnce(new Error('connection ended after request write'));
+    vi.spyOn(ctx.accountService, 'getProviderForAccount').mockResolvedValue(fakeProvider as never);
+    const { token } = await createProfileAndToken(ctx, account.body.id, {
+      readEnabled: true,
+      sendEnabled: true,
+      draftEnabled: true
+    });
+    const payload = {
+      accountId: account.body.id,
+      to: ['person@company.com'],
+      subject: 'Ambiguous',
+      text: 'body',
+      idempotencyKey: 'ambiguous-throw'
+    };
+
+    const first = await request(ctx.app)
+      .post('/api/mail/send')
+      .set('Authorization', `Bearer ${token}`)
+      .send(payload)
+      .expect(424);
+    const second = await request(ctx.app)
+      .post('/api/mail/send')
+      .set('Authorization', `Bearer ${token}`)
+      .send(payload)
+      .expect(424);
+
+    expect(first.body.error.code).toBe('SEND_OUTCOME_UNKNOWN');
+    expect(second.body.error.code).toBe('SEND_OUTCOME_UNKNOWN');
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts confirmed-failure retries against the hourly attempt limit', async () => {
+    ctx.cleanup();
+    ctx = createTestContext({ maxSendsPerAccountPerHour: 2 });
+    const account = await createAccount();
+    const fakeProvider = createFakeProvider({
+      sendResult: { status: 'failed', detail: 'confirmed rejection' }
+    });
+    const sendSpy = vi.spyOn(fakeProvider, 'sendMessage');
+    vi.spyOn(ctx.accountService, 'getProviderForAccount').mockResolvedValue(fakeProvider as never);
+    const { token } = await createProfileAndToken(ctx, account.body.id, {
+      readEnabled: true,
+      sendEnabled: true,
+      draftEnabled: true
+    });
+    const payload = {
+      accountId: account.body.id,
+      to: ['person@company.com'],
+      subject: 'Bound retries',
+      text: 'body',
+      idempotencyKey: 'bounded-retry'
+    };
+
+    await request(ctx.app).post('/api/mail/send')
+      .set('Authorization', `Bearer ${token}`).send(payload).expect(502);
+    await request(ctx.app).post('/api/mail/send')
+      .set('Authorization', `Bearer ${token}`).send(payload).expect(502);
+    const limited = await request(ctx.app).post('/api/mail/send')
+      .set('Authorization', `Bearer ${token}`).send(payload).expect(429);
+
+    expect(limited.body.error.code).toBe('RATE_LIMITED');
+    expect(sendSpy).toHaveBeenCalledTimes(2);
+  });
 });

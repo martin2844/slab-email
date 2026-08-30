@@ -178,6 +178,8 @@ export class MailService {
 
     const currentWindowStart = Date.now() - PROVIDER_RATE_WINDOW_MS;
     const existing = this.db.getSendOperation(account.id, input.idempotencyKey);
+    let pendingId: number | undefined;
+    let failedOperationId: number | undefined;
     if (existing) {
       if (existing.status === 'sent') {
         return {
@@ -197,7 +199,17 @@ export class MailService {
           }
         );
       }
-      throw new ApiError(ERROR_CODES.IDEMPOTENCY_CONFLICT, 'operation already in progress', 409);
+      if (existing.status === 'failed') {
+        failedOperationId = existing.id;
+      } else {
+        throw new ApiError(
+          ERROR_CODES.IDEMPOTENCY_CONFLICT,
+          existing.status === 'pending'
+            ? 'operation outcome is unresolved; refusing a blind retry'
+            : 'operation already in progress',
+          409
+        );
+      }
     }
 
     const provider = await this.accountService.getProviderForAccount(account.id);
@@ -216,11 +228,17 @@ export class MailService {
       );
     }
 
-    const pendingId = this.db.createSendOperation({
-      accountId: account.id,
-      idempotencyKey: input.idempotencyKey,
-      operation
-    })?.id;
+    if (failedOperationId) {
+      if (this.db.claimFailedSendOperation(failedOperationId)) {
+        pendingId = failedOperationId;
+      }
+    } else {
+      pendingId = this.db.createSendOperation({
+        accountId: account.id,
+        idempotencyKey: input.idempotencyKey,
+        operation
+      })?.id;
+    }
 
     if (!pendingId) {
       const afterRace = this.db.getSendOperation(account.id, input.idempotencyKey);
@@ -250,8 +268,13 @@ export class MailService {
     try {
       result = await input.action(provider);
     } catch (error) {
-      this.db.markSendOperationStatus(pendingId, 'failed', undefined, undefined, String(error));
-      throw error;
+      this.db.markSendOperationStatus(pendingId, 'unknown', undefined, undefined, String(error));
+      throw new ApiError(
+        ERROR_CODES.SEND_OUTCOME_UNKNOWN,
+        'provider call ended without a confirmed send outcome',
+        424,
+        { status: 'unknown' }
+      );
     }
 
     const finalStatus = result.status === 'sent' ? 'sent' : result.status === 'failed' ? 'failed' : 'unknown';

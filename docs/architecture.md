@@ -69,7 +69,9 @@
 - On repeated key:
   - `sent` -> return prior result
   - `unknown` -> `SEND_OUTCOME_UNKNOWN`, no blind retry
-  - pending/in-progress -> `IDEMPOTENCY_CONFLICT`
+  - `failed` -> atomically reclaim and retry the confirmed failure
+  - `pending` -> `IDEMPOTENCY_CONFLICT`; an unresolved operation is never
+    retried blindly
 
 ## Audit / observability
 

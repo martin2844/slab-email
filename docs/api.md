@@ -332,7 +332,9 @@ Response:
 }
 ```
 
-Duplicate idempotency key returns prior result without duplicate sends.
+A duplicate idempotency key returns a prior successful result without another
+send. Confirmed failures may be retried with the same key; unresolved or
+unknown outcomes fail closed rather than risking a duplicate message.
 
 ### `POST /api/mail/reply`
 

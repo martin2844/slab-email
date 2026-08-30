@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 
 const nowIso = (): string => new Date().toISOString();
-export const EMAIL_SCHEMA_VERSIONS = [1, 2, 3, 4] as const;
+export const EMAIL_SCHEMA_VERSIONS = [1, 2, 3, 4, 5, 6] as const;
 
 function applyBaseSchema(db: Database.Database): void {
   const apply = db.transaction(() => {
@@ -207,8 +207,48 @@ function migrateInboundEvents(db: Database.Database): void {
   migration.immediate();
 }
 
+function migrateLegacyFailedSendOutcomes(db: Database.Database): void {
+  const applied = db.prepare('SELECT 1 FROM schema_migrations WHERE version = 5').get();
+  if (applied) return;
+  const migration = db.transaction(() => {
+    // Before version 5, thrown provider/transport errors were stored as `failed` even
+    // though the upstream might have accepted the message. Preserve idempotency by
+    // failing those historical outcomes closed instead of making them retryable.
+    db.prepare("UPDATE send_operations SET status = 'unknown' WHERE status = 'failed'").run();
+    db.prepare(
+      'INSERT INTO schema_migrations(version, name, applied_at) VALUES (5, ?, ?)'
+    ).run('legacy_failed_send_outcomes_unknown', nowIso());
+  });
+  migration.immediate();
+}
+
+function migrateSendAttemptLedger(db: Database.Database): void {
+  const applied = db.prepare('SELECT 1 FROM schema_migrations WHERE version = 6').get();
+  if (applied) return;
+  const migration = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE send_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id TEXT NOT NULL,
+        attempted_at TEXT NOT NULL,
+        FOREIGN KEY(account_id) REFERENCES email_accounts(id) ON DELETE CASCADE
+      );
+      INSERT INTO send_attempts (account_id, attempted_at)
+        SELECT account_id, created_at FROM send_operations;
+      CREATE INDEX idx_send_attempts_account_time
+        ON send_attempts(account_id, attempted_at);
+    `);
+    db.prepare(
+      'INSERT INTO schema_migrations(version, name, applied_at) VALUES (6, ?, ?)'
+    ).run('send_attempt_ledger', nowIso());
+  });
+  migration.immediate();
+}
+
 export function runMigrations(db: Database.Database): void {
   applyBaseSchema(db);
   migrateProviderTypes(db);
   migrateInboundEvents(db);
+  migrateLegacyFailedSendOutcomes(db);
+  migrateSendAttemptLedger(db);
 }

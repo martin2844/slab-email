@@ -20,19 +20,19 @@ describe('database lifecycle', () => {
     try {
       expect(database.getMigrationStatus()).toEqual({
         ready: false,
-        expected: [1, 2, 3, 4],
+        expected: [1, 2, 3, 4, 5, 6],
         applied: [],
-        pending: [1, 2, 3, 4]
+        pending: [1, 2, 3, 4, 5, 6]
       });
       database.migrate();
       expect(database.getMigrationStatus()).toEqual({
         ready: true,
-        expected: [1, 2, 3, 4],
-        applied: [1, 2, 3, 4],
+        expected: [1, 2, 3, 4, 5, 6],
+        applied: [1, 2, 3, 4, 5, 6],
         pending: []
       });
       database.migrate();
-      expect(database.getMigrationStatus().applied).toEqual([1, 2, 3, 4]);
+      expect(database.getMigrationStatus().applied).toEqual([1, 2, 3, 4, 5, 6]);
     } finally {
       database.close();
     }
@@ -66,13 +66,54 @@ describe('database lifecycle', () => {
     const migrated = new DatabaseService(path);
     try {
       expect(migrated.getEmailAccountById('legacy')?.provider).toBe('gmail');
-      expect(migrated.getMigrationStatus()).toMatchObject({ ready: true, applied: [1, 2, 3, 4] });
+      expect(migrated.getMigrationStatus()).toMatchObject({ ready: true, applied: [1, 2, 3, 4, 5, 6] });
       migrated.upsertEmailAccount({
         id: 'agentmail', provider: 'agentmail', emailAddress: 'agent@agentmail.to',
         displayName: 'Agent', enabled: true,
         config: { emailAddress: 'agent@agentmail.to', displayName: 'Agent', inboxId: 'agent@agentmail.to', baseUrl: 'https://api.agentmail.to/v0' },
       });
       expect(migrated.getEmailAccountById('agentmail')?.provider).toBe('agentmail');
+    } finally {
+      migrated.close();
+    }
+  });
+
+  it('fails legacy ambiguous send failures closed during upgrade', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'slab-email-send-upgrade-'));
+    directories.push(directory);
+    const path = join(directory, 'email.db');
+    const current = new DatabaseService(path);
+    current.close();
+
+    const legacy = new Database(path);
+    legacy.exec(`
+      DELETE FROM schema_migrations WHERE version = 5;
+      INSERT INTO email_accounts (
+        id, provider, email_address, display_name, enabled, config_json,
+        created_at, updated_at, inbound_generation
+      ) VALUES (
+        'legacy-account', 'resend', 'ops@example.com', 'Ops', 1, '{}',
+        '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z', 1
+      );
+      INSERT INTO send_operations (
+        account_id, idempotency_key, operation, status, error_code,
+        created_at, updated_at
+      ) VALUES (
+        'legacy-account', 'legacy-ambiguous', 'send', 'failed', 'PROVIDER_ERROR',
+        '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z'
+      );
+    `);
+    legacy.close();
+
+    const migrated = new DatabaseService(path);
+    try {
+      expect(migrated.getMigrationStatus()).toMatchObject({
+        ready: true,
+        applied: [1, 2, 3, 4, 5, 6]
+      });
+      expect(
+        migrated.getAuditForOperation('legacy-account', 'legacy-ambiguous')?.status
+      ).toBe('unknown');
     } finally {
       migrated.close();
     }
