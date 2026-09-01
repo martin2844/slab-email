@@ -12,6 +12,7 @@ FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930
 
 ARG PROTON_BRIDGE_VERSION=3.26.0
 ARG PROTON_BRIDGE_SOURCE_SHA256=5b19c63989d4efa05d3b05044be4718e4854b879c57419c837d1aca179661939
+ARG PROTON_BRIDGE_CRYPTO_VERSION=v0.55.0
 
 ENV PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -34,9 +35,14 @@ RUN apt-get update \
 
 WORKDIR /src
 
+# Bridge 3.26.0 pins x/crypto 0.53.0. Keep the official source while applying
+# the upstream security-only module release until Bridge includes it.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    cd /src/utils \
+    cd /src \
+  && go get "golang.org/x/crypto@${PROTON_BRIDGE_CRYPTO_VERSION}" \
+  && go mod verify \
+  && cd /src/utils \
   && ./credits.sh bridge \
   && cd /src \
   && CGO_ENABLED=1 CGO_LDFLAGS="-lfido2 -lcbor -lssl -lcrypto" \
@@ -46,7 +52,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -o /out/proton-bridge \
       ./cmd/Desktop-Bridge/ \
   && install -m 0644 LICENSE /out/PROTON-BRIDGE-LICENSE \
-  && install -m 0644 /tmp/proton-bridge-source.tar.gz /out/PROTON-BRIDGE-SOURCE.tar.gz
+  && install -m 0644 /tmp/proton-bridge-source.tar.gz /out/PROTON-BRIDGE-UPSTREAM-SOURCE.tar.gz \
+  && tar --create --gzip --directory=/src --file=/out/PROTON-BRIDGE-SOURCE.tar.gz .
 
 FROM node:22-slim AS runtime
 

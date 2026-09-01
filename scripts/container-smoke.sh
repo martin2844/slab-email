@@ -56,6 +56,7 @@ test "$(docker exec "$container" /usr/local/libexec/proton-bridge --version)" = 
   "Proton Mail Bridge 3.26.0"
 docker exec "$container" test -r /usr/local/libexec/PROTON-BRIDGE-LICENSE
 docker exec "$container" test -r /usr/local/libexec/PROTON-BRIDGE-SOURCE.tar.gz
+docker exec "$container" test -r /usr/local/libexec/PROTON-BRIDGE-UPSTREAM-SOURCE.tar.gz
 docker exec "$container" node dist/proton/setup-cli.js --status |
   grep -F 'Managed Proton Bridge v3.26.0: stopped; 0 account(s).' >/dev/null
 
