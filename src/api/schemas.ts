@@ -149,6 +149,10 @@ export const googleOauthSettingsSchema = z.object({
   clientSecret: z.string().trim().min(1).max(4096).optional()
 });
 
+export const googleOauthCredentialsReuseSchema = z.object({
+  purpose: z.literal('google_data')
+});
+
 export const microsoftOauthSettingsSchema = z.object({
   clientId: z.string().trim().min(1).max(512),
   clientSecret: z.string().trim().min(1).max(4096).optional(),

@@ -19,6 +19,7 @@ import {
   createProtonBridgeAccountSchema,
   draftSchema,
   gmailConnectSchema,
+  googleOauthCredentialsReuseSchema,
   googleOauthSettingsSchema,
   microsoftOauthSettingsSchema,
   managedProtonAbortSchema,
@@ -308,6 +309,16 @@ export const createApp = (ctx: AppContext): express.Express => {
     try {
       const payload = googleOauthSettingsSchema.parse(req.body ?? {});
       res.status(200).json(ctx.accountService.saveGoogleOAuthSettings(payload));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  adminRouter.post('/settings/google-oauth/credentials', adminAuth, (req, res, next) => {
+    try {
+      googleOauthCredentialsReuseSchema.parse(req.body ?? {});
+      res.set('Cache-Control', 'no-store');
+      res.status(200).json(ctx.accountService.getGoogleOAuthCredentialsForTrustedService());
     } catch (error) {
       next(error);
     }

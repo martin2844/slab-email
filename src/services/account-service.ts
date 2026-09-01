@@ -494,6 +494,21 @@ export class AccountService {
     return this.getGoogleOAuthSettings();
   }
 
+  getGoogleOAuthCredentialsForTrustedService(): {
+    clientId: string;
+    clientSecret: string;
+  } {
+    const credentials = this.resolveGoogleOAuthCredentials();
+    if (!credentials.clientId || !credentials.clientSecret) {
+      throw new ApiError(
+        ERROR_CODES.INVALID_CONFIGURATION,
+        'Google OAuth credentials are not configured',
+        409
+      );
+    }
+    return credentials;
+  }
+
   private resolveGoogleOAuthCredentials(): {
     clientId: string;
     clientSecret: string;

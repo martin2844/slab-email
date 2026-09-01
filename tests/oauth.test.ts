@@ -26,6 +26,46 @@ describe('OAuth security and validation', () => {
       .patch('/api/settings/google-oauth')
       .send({ clientId: 'unauthorized', clientSecret: 'must-not-store' })
       .expect(401);
+    await request(ctx.app)
+      .post('/api/settings/google-oauth/credentials')
+      .send({ purpose: 'google_data' })
+      .expect(401);
+  });
+
+  it('copies Google OAuth credentials only through an explicit authenticated server request', async () => {
+    const response = await request(ctx.app)
+      .post('/api/settings/google-oauth/credentials')
+      .set('Authorization', `Bearer ${ctx.config.adminKey}`)
+      .send({ purpose: 'google_data' })
+      .expect(200);
+
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.body).toEqual({
+      clientId: 'test-google-client-id',
+      clientSecret: 'test-google-client-secret'
+    });
+    await request(ctx.app)
+      .post('/api/settings/google-oauth/credentials')
+      .set('Authorization', `Bearer ${ctx.config.adminKey}`)
+      .send({ purpose: 'unsupported' })
+      .expect(400);
+    await request(ctx.app)
+      .get('/api/settings/google-oauth/credentials')
+      .set('Authorization', `Bearer ${ctx.config.adminKey}`)
+      .expect(401);
+  });
+
+  it('refuses credential reuse when Google OAuth is not configured', async () => {
+    const ctxWithoutGoogle = createTestContext({
+      googleClientId: '',
+      googleClientSecret: ''
+    });
+    await request(ctxWithoutGoogle.app)
+      .post('/api/settings/google-oauth/credentials')
+      .set('Authorization', `Bearer ${ctxWithoutGoogle.config.adminKey}`)
+      .send({ purpose: 'google_data' })
+      .expect(409);
+    ctxWithoutGoogle.cleanup();
   });
 
   let ctx: ReturnType<typeof createTestContext>;
