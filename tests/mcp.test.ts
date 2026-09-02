@@ -190,6 +190,21 @@ describe('MCP endpoint', () => {
     });
     expect(search.result.structuredContent.items).toHaveLength(1);
 
+    const message = await call(12, 'email_get_message', {
+      accountId: account.body.id,
+      messageId: 'message-1'
+    });
+    expect(message.result.structuredContent).toMatchObject({
+      id: 'message-1',
+      text: 'body'
+    });
+    expect(JSON.parse(message.result.content[0].text)).toMatchObject({
+      id: 'message-1',
+      subject: 'hello',
+      body: 'body',
+      bodyFormat: 'text'
+    });
+
     const send = await call(11, 'email_send', {
       accountId: account.body.id,
       expectedFrom: 'sales@clasific.ar',

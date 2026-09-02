@@ -53,6 +53,25 @@ const sanitizeError = (error: unknown): string => {
 const asStructuredContent = (value: unknown): Record<string, unknown> => value as Record<string, unknown>;
 const textContent = (value: string): { type: 'text'; text: string }[] => [{ type: 'text', text: value }];
 
+const messageContent = (message: Awaited<ReturnType<MailService['getMessage']>>) =>
+  textContent(
+    JSON.stringify({
+      id: message.id,
+      threadId: message.threadId,
+      messageId: message.messageId,
+      inReplyTo: message.inReplyTo,
+      references: message.references,
+      from: message.from,
+      to: message.to,
+      cc: message.cc,
+      subject: message.subject,
+      date: message.date,
+      unread: message.unread,
+      body: message.text || message.html || message.snippet,
+      bodyFormat: message.text ? 'text' : message.html ? 'html' : 'snippet'
+    })
+  );
+
 const toolError = (error: unknown) => {
   const normalized = error instanceof ApiError ? `${error.code}: ${error.message}` : sanitizeError(error);
   const safeDetails =
@@ -275,7 +294,7 @@ export const createMcpTools = (
     server.registerTool(
       'email_get_message',
       {
-        description: 'Get message by account and message id',
+        description: 'Get a complete message, including its body, by account and message id',
         inputSchema: getMessageInputSchema,
         annotations: MAIL_READ_TOOL
       },
@@ -285,7 +304,7 @@ export const createMcpTools = (
           const message = await mailService.getMessage(req, args.accountId, args.messageId);
           return {
             structuredContent: asStructuredContent(message),
-            content: textContent(`${message.subject || '(no subject)'} ${message.id}`)
+            content: messageContent(message)
           };
         } catch (error) {
           return toolError(error);
