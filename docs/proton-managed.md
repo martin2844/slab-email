@@ -55,7 +55,7 @@ trusted REST callers and are not exposed as approvable agent actions.
 
 The official source is downloaded from Proton's pinned GitHub release during
 the image build and verified with a fixed SHA-256 checksum. Bridge is compiled
-with a compatible patched Go toolchain. Its GPLv3 license is
+with a compatible patched Go toolchain and security-only module updates. Its GPLv3 license is
 included at `/usr/local/libexec/PROTON-BRIDGE-LICENSE` in the image, and the
 exact v3.26.0 corresponding source archive is included at
 `/usr/local/libexec/PROTON-BRIDGE-SOURCE.tar.gz`.

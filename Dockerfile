@@ -13,6 +13,7 @@ FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930
 ARG PROTON_BRIDGE_VERSION=3.26.0
 ARG PROTON_BRIDGE_SOURCE_SHA256=5b19c63989d4efa05d3b05044be4718e4854b879c57419c837d1aca179661939
 ARG PROTON_BRIDGE_CRYPTO_VERSION=v0.55.0
+ARG PROTON_BRIDGE_GRPC_VERSION=v1.83.1
 
 ENV PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -35,12 +36,14 @@ RUN apt-get update \
 
 WORKDIR /src
 
-# Bridge 3.26.0 pins x/crypto 0.53.0. Keep the official source while applying
-# the upstream security-only module release until Bridge includes it.
+# Keep the official Bridge source while applying compatible security-only Go
+# module releases until Proton includes them in a tagged version.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     cd /src \
-  && go get "golang.org/x/crypto@${PROTON_BRIDGE_CRYPTO_VERSION}" \
+  && go get \
+    "golang.org/x/crypto@${PROTON_BRIDGE_CRYPTO_VERSION}" \
+    "google.golang.org/grpc@${PROTON_BRIDGE_GRPC_VERSION}" \
   && go mod verify \
   && cd /src/utils \
   && ./credits.sh bridge \

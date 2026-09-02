@@ -157,8 +157,8 @@ reachable from a remote VPS unless that network path is explicitly provided.
 
 Managed Bridge requires a paid Proton plan. It is built for amd64 and arm64
 from Proton's verified v3.26.0 source archive with a compatible patched Go
-toolchain. The image preserves Proton Bridge's GPLv3 license and the exact
-corresponding source archive beside the binary.
+toolchain and security-only module updates. The image preserves Proton Bridge's
+GPLv3 license and the exact corresponding source archive beside the binary.
 
 See [docs/proton.md](docs/proton.md).
 
