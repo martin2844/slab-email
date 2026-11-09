@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 
 const nowIso = (): string => new Date().toISOString();
-export const EMAIL_SCHEMA_VERSIONS = [1, 2, 3, 4, 5, 6] as const;
+export const EMAIL_SCHEMA_VERSIONS = [1, 2, 3, 4, 5, 6, 7] as const;
 
 function applyBaseSchema(db: Database.Database): void {
   const apply = db.transaction(() => {
@@ -245,10 +245,45 @@ function migrateSendAttemptLedger(db: Database.Database): void {
   migration.immediate();
 }
 
+function migrateOutreachSafety(db: Database.Database): void {
+  const applied = db.prepare('SELECT 1 FROM schema_migrations WHERE version = 7').get();
+  if (applied) return;
+  const migration = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE email_suppressions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind TEXT NOT NULL CHECK(kind IN ('address','domain')),
+        value TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        source TEXT NOT NULL,
+        account_id TEXT,
+        profile_id TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE(kind, value)
+      );
+      ALTER TABLE send_attempts ADD COLUMN operation TEXT
+        CHECK(operation IS NULL OR operation IN ('send','reply'));
+      UPDATE send_attempts SET operation = (
+        SELECT so.operation FROM send_operations so
+        WHERE so.account_id = send_attempts.account_id
+          AND so.created_at = send_attempts.attempted_at
+        LIMIT 1
+      );
+      CREATE INDEX idx_send_attempts_account_operation_time
+        ON send_attempts(account_id, operation, attempted_at);
+    `);
+    db.prepare(
+      'INSERT INTO schema_migrations(version, name, applied_at) VALUES (7, ?, ?)'
+    ).run('outreach_suppressions_and_daily_cap', nowIso());
+  });
+  migration.immediate();
+}
+
 export function runMigrations(db: Database.Database): void {
   applyBaseSchema(db);
   migrateProviderTypes(db);
   migrateInboundEvents(db);
   migrateLegacyFailedSendOutcomes(db);
   migrateSendAttemptLedger(db);
+  migrateOutreachSafety(db);
 }

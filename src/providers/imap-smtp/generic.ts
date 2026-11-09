@@ -6,16 +6,21 @@ import nodemailer, { type SentMessageInfo, type Transporter } from 'nodemailer';
 
 import {
   AccountCapabilities,
+  AttachmentMetadata,
   DraftInput,
   EmailAddress,
   EmailMessage,
   EmailMessageCompact,
   MessageSearchParams,
+  OutgoingAttachment,
+  ProviderAttachment,
   ProviderSendResult,
   ReplyInput,
   SendInput
 } from '../../types/models.js';
+import { attachmentNotFound } from '../../utils/attachments.js';
 import { clampText, firstTextOrBody, normalizeAddressList } from '../../utils/message.js';
+import { buildMimeMessage } from '../../utils/mime.js';
 import { Provider } from '../types.js';
 import type { GenericImapSmtpProviderConfig } from './types.js';
 
@@ -162,11 +167,6 @@ const closeSmtpTransport = (transport: Transporter): void => {
 
 const isLoopbackHost = (host: string): boolean => LOOPBACK_HOSTS.has(host);
 
-const toHeaderList = (addresses: EmailAddress[]): string[] =>
-  addresses
-    .filter((entry) => Boolean(entry.address))
-    .map((entry) => (entry.name ? `${entry.name} <${entry.address}>` : entry.address));
-
 const normalizeDomain = (value: string): string => {
   const at = value.lastIndexOf('@');
   return at === -1 ? 'localhost' : value.slice(at + 1);
@@ -217,6 +217,11 @@ interface ParsedMessageSource {
   to: EmailAddress[];
   cc: EmailAddress[];
   bcc: EmailAddress[];
+  attachments: ParsedAttachment[];
+}
+
+interface ParsedAttachment extends AttachmentMetadata {
+  content: Buffer;
 }
 
 const parseMessageSource = async (source: Buffer | string): Promise<ParsedMessageSource> => {
@@ -253,7 +258,16 @@ const normalizeAddressListSafe = (value: unknown): EmailAddress[] => {
     from: normalizeAddressListSafe(parsed.from?.value),
     to: normalizeAddressListSafe(parsed.to?.value),
     cc: normalizeAddressListSafe(parsed.cc?.value),
-    bcc: normalizeAddressListSafe(parsed.bcc?.value)
+    bcc: normalizeAddressListSafe(parsed.bcc?.value),
+    // Attachment ids are the zero-based MIME order, stable for an immutable IMAP message.
+    attachments: (parsed.attachments ?? []).map((attachment, index) => ({
+      id: String(index),
+      filename: attachment.filename || `attachment-${index + 1}`,
+      contentType: (attachment.contentType || 'application/octet-stream').toLowerCase(),
+      size: attachment.size ?? attachment.content?.length ?? 0,
+      inline: attachment.contentDisposition === 'inline' || attachment.related === true,
+      content: attachment.content
+    }))
   };
 };
 
@@ -570,7 +584,12 @@ export class GenericImapSmtpProvider implements Provider {
     }
   }
 
-  async getMessage(accountId: string, messageId: string): Promise<EmailMessage> {
+  private async loadMessage(messageId: string): Promise<{
+    providerIdentity: string;
+    rfcMessageId: string;
+    parsed: ParsedMessageSource;
+    flags?: Set<string>;
+  }> {
     const {
       uid,
       uidValidity: expectedUidValidity,
@@ -604,37 +623,17 @@ export class GenericImapSmtpProvider implements Provider {
           throw new Error('message not found');
         }
 
-        const parsed = fetched.parsed;
         const providerIdentity = formatImapMessageId(
           uidValidity,
           uid,
           connectionFingerprint
         );
-        const rfcMessageId =
-          parsed.messageId ?? formatSyntheticImapMessageId(providerIdentity);
-        const body = firstTextOrBody(parsed.text, parsed.html);
         return {
-          id: providerIdentity,
-          accountId,
-          provider: 'imap_smtp',
-          threadId: buildImapThreadId(
-            parsed.inReplyTo,
-            parsed.references,
-            rfcMessageId
-          ),
-          messageId: rfcMessageId,
-          inReplyTo: parsed.inReplyTo,
-          references: parsed.references,
-          from: parsed.from[0] ?? { address: '' },
-          to: parsed.to,
-          cc: parsed.cc,
-          bcc: parsed.bcc,
-          subject: parsed.subject,
-          date: parsed.date,
-          snippet: clampText(body),
-          unread: !fetched.flags?.has('\\Seen'),
-          text: parsed.text,
-          html: parsed.html
+          providerIdentity,
+          rfcMessageId:
+            fetched.parsed.messageId ?? formatSyntheticImapMessageId(providerIdentity),
+          parsed: fetched.parsed,
+          flags: fetched.flags
         };
       } finally {
         mailboxLock.release();
@@ -642,6 +641,54 @@ export class GenericImapSmtpProvider implements Provider {
     } finally {
       await client.logout();
     }
+  }
+
+  async getMessage(accountId: string, messageId: string): Promise<EmailMessage> {
+    const { providerIdentity, rfcMessageId, parsed, flags } = await this.loadMessage(messageId);
+    const body = firstTextOrBody(parsed.text, parsed.html);
+    return {
+      id: providerIdentity,
+      accountId,
+      provider: 'imap_smtp',
+      threadId: buildImapThreadId(
+        parsed.inReplyTo,
+        parsed.references,
+        rfcMessageId
+      ),
+      messageId: rfcMessageId,
+      inReplyTo: parsed.inReplyTo,
+      references: parsed.references,
+      from: parsed.from[0] ?? { address: '' },
+      to: parsed.to,
+      cc: parsed.cc,
+      bcc: parsed.bcc,
+      subject: parsed.subject,
+      date: parsed.date,
+      snippet: clampText(body),
+      unread: !flags?.has('\\Seen'),
+      text: parsed.text,
+      html: parsed.html,
+      attachments: parsed.attachments.map(({ id, filename, contentType, size, inline }) => ({
+        id,
+        filename,
+        contentType,
+        size,
+        inline
+      }))
+    };
+  }
+
+  async getAttachment(_accountId: string, messageId: string, attachmentId: string): Promise<ProviderAttachment> {
+    const { parsed } = await this.loadMessage(messageId);
+    const attachment = parsed.attachments.find((entry) => entry.id === attachmentId);
+    if (!attachment) throw attachmentNotFound(attachmentId);
+    return {
+      id: attachment.id,
+      filename: attachment.filename,
+      contentType: attachment.contentType,
+      size: attachment.size,
+      load: async () => attachment.content
+    };
   }
 
   async getThread(_accountId: string, _threadId: string): Promise<EmailMessage[]> {
@@ -664,6 +711,7 @@ export class GenericImapSmtpProvider implements Provider {
     subject: string;
     text: string;
     html?: string;
+    attachments?: OutgoingAttachment[];
     idempotencyKey?: string;
     inReplyTo?: string | null;
     references?: string[];
@@ -674,31 +722,32 @@ export class GenericImapSmtpProvider implements Provider {
       this.smtpMessageIdDomain || normalizeDomain(this.emailAddress)
     );
 
-    const refs = payload.references?.filter(Boolean).join(' ');
-    const headers = [
-      `From: ${this.displayName} <${this.emailAddress}>`,
-      `To: ${toHeaderList(payload.to).join(', ')}`,
-      payload.cc?.length ? `Cc: ${toHeaderList(payload.cc).join(', ')}` : undefined,
-      payload.bcc?.length ? `Bcc: ${toHeaderList(payload.bcc).join(', ')}` : undefined,
-      `Subject: ${payload.subject}`,
-      `Date: ${new Date().toUTCString()}`,
-      `Message-ID: ${messageId}`,
-      payload.inReplyTo ? `In-Reply-To: ${payload.inReplyTo}` : undefined,
-      refs ? `References: ${refs}` : undefined,
-      'MIME-Version: 1.0',
-      'Content-Type: text/plain; charset=utf-8',
-      payload.idempotencyKey ? `X-Slab-Email-Idempotency-Key: ${payload.idempotencyKey}` : undefined
-    ].filter(Boolean).join('\n');
-
-    const body = payload.html ? `${payload.text}\n\n${payload.html}` : payload.text;
+    const raw = await buildMimeMessage({
+      from: { name: this.displayName, address: this.emailAddress },
+      to: payload.to,
+      cc: payload.cc,
+      bcc: payload.bcc,
+      subject: payload.subject,
+      text: payload.text,
+      html: payload.html,
+      attachments: payload.attachments,
+      messageId,
+      inReplyTo: payload.inReplyTo,
+      references: payload.references,
+      headers: payload.idempotencyKey
+        ? { 'X-Slab-Email-Idempotency-Key': payload.idempotencyKey }
+        : undefined
+    });
 
     try {
       const info = await transport.sendMail({
-        from: `${this.displayName} <${this.emailAddress}>`,
-        to: payload.to.map((entry) => entry.address),
-        cc: payload.cc?.map((entry) => entry.address),
-        bcc: payload.bcc?.map((entry) => entry.address),
-        raw: `${headers}\n\n${body}`
+        envelope: {
+          from: this.emailAddress,
+          to: [...payload.to, ...(payload.cc ?? []), ...(payload.bcc ?? [])].map(
+            (entry) => entry.address
+          )
+        },
+        raw
       });
 
       return {
@@ -750,6 +799,7 @@ export class GenericImapSmtpProvider implements Provider {
       subject,
       text: input.text,
       html: input.html,
+      attachments: input.attachments,
       inReplyTo: originalMessageId,
       references: refs,
       idempotencyKey: input.idempotencyKey

@@ -43,6 +43,11 @@ Known error codes include:
 - `SEND_OUTCOME_UNKNOWN`
 - `INVALID_CONFIGURATION`
 - `RATE_LIMITED`
+- `DAILY_SEND_LIMIT_REACHED` (429; `details.retryAt`, `details.retryAfterSeconds`, `details.limit`)
+- `RECIPIENT_SUPPRESSED` (409; `details.suppressed[]` = `{ address, kind, value }`)
+- `ATTACHMENT_NOT_FOUND` (404)
+- `ATTACHMENT_TOO_LARGE` (413; `details.size`, `details.maxBytes`)
+- `NOT_SUPPORTED` (provider cannot perform the operation)
 - `STATE_INVALID`
 - `STATE_EXPIRED`
 - `INVALID_INPUT`
@@ -91,6 +96,9 @@ Returns account metadata and caps (no secrets).
 
 Patch account metadata/config and optionally credentials (`username`, `password`).
 `POST` remains available as a backwards-compatible alias.
+
+Accounts also accept `dailySendLimit` (integer >= 0, or `null` to use
+`MAX_NEW_SENDS_PER_ACCOUNT_PER_DAY`), the rolling 24h cap on new sends.
 
 ### `DELETE /api/accounts/:id`
 
@@ -181,6 +189,20 @@ scan will continue on the next poll.
 
 Runs one inbound discovery pass. Concurrent requests share the same in-flight
 pass. This endpoint and both inbound read endpoints require the admin token.
+
+### Suppression (opt-out) list
+
+Opted-out addresses or domains never receive new emails (`/api/mail/send`,
+`email_send`) from any account. Replies stay allowed unless they add suppressed
+`cc` recipients. Domain entries also match subdomains.
+
+- `GET /api/suppressions?q=<substring>` (admin): `{ "items": [{ "id", "kind", "value", "reason", "source", "accountId", "profileId", "createdAt" }] }`
+- `POST /api/suppressions` (admin): `{ "address": "x@y.com", "reason": "..." }` or
+  `{ "domain": "y.com", "reason": "..." }`. Returns `201` with `{ entry, created: true }`,
+  or `200` with `created: false` when already present.
+- `DELETE /api/suppressions/:id` (admin): `204`, or `404` when missing.
+- `POST /api/mail/suppressions` (connector token): `{ "address", "reason", "scope?": "address" | "domain", "accountId?" }`.
+  Connector tokens can add entries but cannot list or remove them.
 
 ### `POST /api/access-profiles`
 
@@ -282,7 +304,30 @@ Returns full message body and headers.
   "headers": {
     "message-id": "<abc>",
     "in-reply-to": "<def>"
-  }
+  },
+  "attachments": [
+    { "id": "1", "filename": "quote.pdf", "contentType": "application/pdf", "size": 48213, "inline": false }
+  ]
+}
+```
+
+### `GET /api/mail/messages/:accountId/:messageId/attachments/:attachmentId`
+
+Returns one attachment (URL-encode ids). Text-like types (`text/*`, JSON, CSV,
+XML, `+json`/`+xml`) come back as text truncated to `MAX_ATTACHMENT_TEXT_BYTES`;
+other types as base64 when at most `MAX_ATTACHMENT_BASE64_BYTES`, otherwise
+`413 ATTACHMENT_TOO_LARGE`. Providers without download support return
+`405 NOT_SUPPORTED`.
+
+```json
+{
+  "id": "1",
+  "filename": "data.csv",
+  "contentType": "text/csv",
+  "size": 1024,
+  "encoding": "text",
+  "content": "a,b\n1,2\n",
+  "truncated": false
 }
 ```
 
@@ -302,9 +347,18 @@ Create remote draft.
   "bcc": [],
   "subject": "Follow-up",
   "text": "Draft content",
-  "html": "<p>Draft content</p>"
+  "html": "<p>Draft content</p>",
+  "attachments": [
+    { "filename": "quote.pdf", "contentType": "application/pdf", "contentBase64": "JVBERi0x..." }
+  ]
 }
 ```
+
+`text` is always required; `html` is sent as the multipart/alternative HTML
+part. `attachments` is optional on drafts, sends and replies (default max 10
+files and 10 MB decoded total; filenames must not contain path separators or
+control characters). Invalid attachments fail with `400 INVALID_INPUT` before
+any provider call.
 
 ### `POST /api/mail/send`
 
@@ -332,6 +386,11 @@ Response:
 }
 ```
 
+Sends are refused with `409 RECIPIENT_SUPPRESSED` when any `to`/`cc`/`bcc`
+address is opted out, and with `429 DAILY_SEND_LIMIT_REACHED` (including
+`retryAt`) once the account reached its rolling 24h cap of new sends. Nothing is
+sent in either case and the idempotency key stays unused.
+
 A duplicate idempotency key returns a prior successful result without another
 send. Confirmed failures may be retried with the same key; unresolved or
 unknown outcomes fail closed rather than risking a duplicate message.
@@ -346,10 +405,16 @@ Send reply linked to message.
   "messageId": "m-123",
   "to": ["customer@example.com"],
   "text": "Thanks for reaching out",
+  "html": "<p>Thanks for reaching out</p>",
+  "attachments": [],
   "replyAll": false,
   "idempotencyKey": "reply-unique-key"
 }
 ```
+
+Replies are not counted against the daily cap (only the hourly limit) and are
+allowed to suppressed senders; explicitly added suppressed `cc` recipients are
+refused.
 
 ## Gmail callback
 

@@ -15,7 +15,9 @@ import {
   OAuthState,
   ProviderType,
   ScopedAuthContext,
-  SendOperationRecord
+  SendOperationRecord,
+  SuppressionEntry,
+  SuppressionKind
 } from '../types/models.js';
 
 const nowIso = (): string => new Date().toISOString();
@@ -136,6 +138,28 @@ interface InboundEventRow {
   received_at: string;
   discovered_at: string;
 }
+
+interface SuppressionRow {
+  id: number;
+  kind: SuppressionKind;
+  value: string;
+  reason: string;
+  source: string;
+  account_id: string | null;
+  profile_id: string | null;
+  created_at: string;
+}
+
+const mapSuppressionRow = (row: SuppressionRow): SuppressionEntry => ({
+  id: row.id,
+  kind: row.kind,
+  value: row.value,
+  reason: row.reason,
+  source: row.source,
+  accountId: row.account_id,
+  profileId: row.profile_id,
+  createdAt: row.created_at
+});
 
 export class InboundScanStateChangedError extends Error {}
 
@@ -812,8 +836,8 @@ export class DatabaseService {
           )
           .run(input.accountId, input.idempotencyKey, input.operation, timestamp, timestamp);
         this.db
-          .prepare('INSERT INTO send_attempts (account_id, attempted_at) VALUES (?, ?)')
-          .run(input.accountId, timestamp);
+          .prepare('INSERT INTO send_attempts (account_id, attempted_at, operation) VALUES (?, ?, ?)')
+          .run(input.accountId, timestamp, input.operation);
         return { id: Number(result.lastInsertRowid) };
       });
       return create.immediate();
@@ -831,14 +855,14 @@ export class DatabaseService {
           UPDATE send_operations
           SET status = 'pending', error_code = NULL, updated_at = ?
           WHERE id = ? AND status = 'failed'
-          RETURNING account_id
+          RETURNING account_id, operation
           `
         )
-        .get(timestamp, operationId) as { account_id: string } | undefined;
+        .get(timestamp, operationId) as { account_id: string; operation: string } | undefined;
       if (!operation) return false;
       this.db
-        .prepare('INSERT INTO send_attempts (account_id, attempted_at) VALUES (?, ?)')
-        .run(operation.account_id, timestamp);
+        .prepare('INSERT INTO send_attempts (account_id, attempted_at, operation) VALUES (?, ?, ?)')
+        .run(operation.account_id, timestamp, operation.operation);
       return true;
     });
     return claim.immediate();
@@ -907,6 +931,101 @@ export class DatabaseService {
       .get(accountId, sinceIso) as { total: number };
 
     return row.total;
+  }
+
+  /** Attempt timestamps (ascending) of one operation type since `sinceIso`. */
+  listSendAttemptTimes(accountId: string, operation: 'send' | 'reply', sinceIso: string): string[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT attempted_at
+        FROM send_attempts
+        WHERE account_id = ? AND operation = ? AND attempted_at >= ?
+        ORDER BY attempted_at ASC
+        `
+      )
+      .all(accountId, operation, sinceIso) as Array<{ attempted_at: string }>;
+    return rows.map((row) => row.attempted_at);
+  }
+
+  listSuppressions(filter: { query?: string } = {}): SuppressionEntry[] {
+    const query = filter.query?.trim().toLowerCase();
+    const rows = (query
+      ? this.db
+          .prepare(
+            'SELECT * FROM email_suppressions WHERE instr(value, ?) > 0 ORDER BY created_at DESC, id DESC'
+          )
+          .all(query)
+      : this.db
+          .prepare('SELECT * FROM email_suppressions ORDER BY created_at DESC, id DESC')
+          .all()) as SuppressionRow[];
+    return rows.map(mapSuppressionRow);
+  }
+
+  getSuppression(id: number): SuppressionEntry | undefined {
+    const row = this.db.prepare('SELECT * FROM email_suppressions WHERE id = ?').get(id) as
+      | SuppressionRow
+      | undefined;
+    return row ? mapSuppressionRow(row) : undefined;
+  }
+
+  /** Inserts a suppression; returns the existing entry when already present. */
+  addSuppression(input: {
+    kind: SuppressionKind;
+    value: string;
+    reason: string;
+    source: string;
+    accountId?: string | null;
+    profileId?: string | null;
+  }): { entry: SuppressionEntry; created: boolean } {
+    const insert = this.db.transaction(() => {
+      const existing = this.db
+        .prepare('SELECT * FROM email_suppressions WHERE kind = ? AND value = ?')
+        .get(input.kind, input.value) as SuppressionRow | undefined;
+      if (existing) return { entry: mapSuppressionRow(existing), created: false };
+      const result = this.db
+        .prepare(
+          `INSERT INTO email_suppressions (kind, value, reason, source, account_id, profile_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          input.kind,
+          input.value,
+          input.reason,
+          input.source,
+          input.accountId ?? null,
+          input.profileId ?? null,
+          nowIso()
+        );
+      const row = this.db
+        .prepare('SELECT * FROM email_suppressions WHERE id = ?')
+        .get(Number(result.lastInsertRowid)) as SuppressionRow;
+      return { entry: mapSuppressionRow(row), created: true };
+    });
+    return insert.immediate();
+  }
+
+  removeSuppression(id: number): boolean {
+    return this.db.prepare('DELETE FROM email_suppressions WHERE id = ?').run(id).changes > 0;
+  }
+
+  /** Returns entries matching any of the given exact addresses or domains. */
+  findSuppressions(addresses: string[], domains: string[]): SuppressionEntry[] {
+    if (addresses.length === 0 && domains.length === 0) return [];
+    const clauses: string[] = [];
+    const params: string[] = [];
+    if (addresses.length) {
+      clauses.push(`(kind = 'address' AND value IN (${addresses.map(() => '?').join(',')}))`);
+      params.push(...addresses);
+    }
+    if (domains.length) {
+      clauses.push(`(kind = 'domain' AND value IN (${domains.map(() => '?').join(',')}))`);
+      params.push(...domains);
+    }
+    const rows = this.db
+      .prepare(`SELECT * FROM email_suppressions WHERE ${clauses.join(' OR ')}`)
+      .all(...params) as SuppressionRow[];
+    return rows.map(mapSuppressionRow);
   }
 
   getAuditForOperation(accountId: string, idempotencyKey: string): SendOperationRecord | undefined {

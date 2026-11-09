@@ -5,16 +5,29 @@ import { RuntimeConfig } from '../config/env.js';
 import { ApiError, ERROR_CODES } from '../types/errors.js';
 import { AuthenticatedRequest } from '../middleware/auth.js';
 import {
+  AccountConfigCommon,
+  AccountRecord,
+  AttachmentContent,
   DraftInput,
   MessageSearchParams,
+  OutgoingAttachmentInput,
   ReplyInput,
   SendInput,
+  SuppressionKind,
   EmailMessageCompact,
   EmailMessage
 } from '../types/models.js';
 import type { Provider } from '../providers/types.js';
+import { readAttachmentContent, validateOutgoingAttachments } from '../utils/attachments.js';
+import { SuppressionService } from './suppression-service.js';
 
 const PROVIDER_RATE_WINDOW_MS = 60 * 60 * 1000;
+const DAILY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+type WithAttachmentInput<T> = Omit<T, 'attachments'> & { attachments?: OutgoingAttachmentInput[] };
+export type DraftRequest = WithAttachmentInput<DraftInput>;
+export type SendRequest = WithAttachmentInput<SendInput>;
+export type ReplyRequest = WithAttachmentInput<ReplyInput>;
 
 type SendOperationResult = {
   status: 'sent' | 'failed' | 'unknown';
@@ -24,11 +37,55 @@ type SendOperationResult = {
 };
 
 export class MailService {
+  readonly suppressions: SuppressionService;
+
   constructor(
     private readonly accountService: AccountService,
     private readonly db: DatabaseService,
     private readonly config: RuntimeConfig
-  ) {}
+  ) {
+    this.suppressions = new SuppressionService(db);
+  }
+
+  private normalizeAttachments(attachments: OutgoingAttachmentInput[] | undefined) {
+    return validateOutgoingAttachments(attachments, this.config);
+  }
+
+  /** Effective rolling-24h cap for new sends: per-account override, else env default. */
+  getDailySendLimit(account: AccountRecord): number {
+    const override = (account.config as AccountConfigCommon).dailySendLimit;
+    return typeof override === 'number' && Number.isInteger(override) && override >= 0
+      ? override
+      : this.config.maxNewSendsPerAccountPerDay;
+  }
+
+  private assertDailySendCapacity(account: AccountRecord): void {
+    const limit = this.getDailySendLimit(account);
+    const now = Date.now();
+    const attempts = this.db.listSendAttemptTimes(
+      account.id,
+      'send',
+      new Date(now - DAILY_WINDOW_MS).toISOString()
+    );
+    if (attempts.length < limit) return;
+    // The window frees a slot once the oldest attempts that exceed (limit - 1) age out.
+    const freeingAttempt = attempts[attempts.length - limit];
+    const retryAt = freeingAttempt ? new Date(Date.parse(freeingAttempt) + DAILY_WINDOW_MS).toISOString() : null;
+    throw new ApiError(
+      ERROR_CODES.DAILY_SEND_LIMIT_REACHED,
+      retryAt
+        ? `daily limit of ${limit} new emails per rolling 24h reached for this account; new emails can be sent again after ${retryAt}. Replies are not affected.`
+        : 'new emails are disabled for this account (daily limit 0). Replies are not affected.',
+      429,
+      {
+        limit,
+        windowHours: 24,
+        sentInWindow: attempts.length,
+        retryAt,
+        retryAfterSeconds: retryAt ? Math.max(0, Math.ceil((Date.parse(retryAt) - now) / 1000)) : null
+      }
+    );
+  }
 
   private getProfile(req: AuthenticatedRequest) {
     if (!req.authContext || req.authContext.type !== 'profile' || !req.authContext.profile) {
@@ -144,9 +201,10 @@ export class MailService {
     return provider.getThread(account.id, threadId);
   }
 
-  async createDraft(req: AuthenticatedRequest, input: DraftInput): Promise<{ draftId: string; threadId?: string | null }> {
+  async createDraft(req: AuthenticatedRequest, request: DraftRequest): Promise<{ draftId: string; threadId?: string | null }> {
     this.canRead(req);
     this.canDraft(req);
+    const input: DraftInput = { ...request, attachments: this.normalizeAttachments(request.attachments) };
 
     const account = this.resolveAccountAccess(req, input.accountId);
     const provider = await this.accountService.getProviderForAccount(account.id);
@@ -309,24 +367,38 @@ export class MailService {
     };
   }
 
-  async send(req: AuthenticatedRequest, input: SendInput): Promise<SendOperationResult> {
+  async send(req: AuthenticatedRequest, request: SendRequest): Promise<SendOperationResult> {
     this.canSend(req);
-    const account = this.resolveAccountAccess(req, input.accountId);
-    this.assertExpectedSender(account, input.expectedFrom);
+    const account = this.resolveAccountAccess(req, request.accountId);
+    this.assertExpectedSender(account, request.expectedFrom);
+    const input: SendInput = { ...request, attachments: this.normalizeAttachments(request.attachments) };
     return this.runIdempotentOperation(req, input.accountId, 'send', {
       idempotencyKey: input.idempotencyKey,
+      preflight: async () => {
+        this.suppressions.assertNotSuppressed(
+          [...input.to, ...(input.cc ?? []), ...(input.bcc ?? [])].map(({ address }) => address),
+          'email_send'
+        );
+        this.assertDailySendCapacity(account);
+      },
       action: (provider) => provider.sendMessage(input)
     });
   }
 
-  async reply(req: AuthenticatedRequest, input: ReplyInput): Promise<SendOperationResult> {
+  async reply(req: AuthenticatedRequest, request: ReplyRequest): Promise<SendOperationResult> {
     this.canSend(req);
-    const token = input.idempotencyKey || randomUUID();
-    const account = this.resolveAccountAccess(req, input.accountId);
-    this.assertExpectedSender(account, input.expectedFrom);
+    const token = request.idempotencyKey || randomUUID();
+    const account = this.resolveAccountAccess(req, request.accountId);
+    this.assertExpectedSender(account, request.expectedFrom);
+    const input: ReplyInput = { ...request, attachments: this.normalizeAttachments(request.attachments) };
     return this.runIdempotentOperation(req, input.accountId, 'reply', {
       idempotencyKey: token,
       preflight: async (provider) => {
+        // Replies answer someone who wrote to us; only explicitly added cc recipients are checked.
+        this.suppressions.assertNotSuppressed(
+          (input.cc ?? []).map(({ address }) => address),
+          'email_reply cc'
+        );
         if (!input.expectedSubject) return;
         const original = await provider.getMessage(account.id, input.messageId);
         const originalSender = original.from.address.trim().toLowerCase();
@@ -357,6 +429,46 @@ export class MailService {
         }
       },
       action: (provider) => provider.replyToMessage({ ...input, idempotencyKey: token })
+    });
+  }
+
+  async getAttachment(
+    req: AuthenticatedRequest,
+    accountId: string,
+    messageId: string,
+    attachmentId: string
+  ): Promise<AttachmentContent> {
+    this.canRead(req);
+    const account = this.resolveAccountAccess(req, accountId);
+    const provider = await this.accountService.getProviderForAccount(account.id);
+    if (!provider.getCapabilities().read) {
+      throw new ApiError(ERROR_CODES.PROVIDER_UNAVAILABLE, 'message read unavailable', 405);
+    }
+    if (!provider.getAttachment) {
+      throw new ApiError(
+        ERROR_CODES.NOT_SUPPORTED,
+        `attachment download is not supported by this provider (${provider.getProviderType()})`,
+        405
+      );
+    }
+    const handle = await provider.getAttachment(account.id, messageId, attachmentId);
+    return readAttachmentContent(handle, this.config);
+  }
+
+  /** Records an opt-out on behalf of a connector profile (MCP email_suppress / REST). */
+  suppress(
+    req: AuthenticatedRequest,
+    input: { address: string; reason: string; scope?: SuppressionKind; accountId?: string }
+  ) {
+    const profile = this.getProfile(req);
+    if (input.accountId) this.resolveAccountAccess(req, input.accountId);
+    return this.suppressions.add({
+      kind: input.scope ?? 'address',
+      value: input.address,
+      reason: input.reason,
+      source: 'connector',
+      accountId: input.accountId ?? null,
+      profileId: profile.id
     });
   }
 }

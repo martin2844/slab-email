@@ -14,6 +14,30 @@ scoped connector token.
 | Resend (inbound enabled) | Yes | No | Yes | No | No |
 | Resend (send-only) | No | No | Yes | No | No |
 
+## HTML bodies and attachments
+
+`text` is always required; when `html` is provided it is sent as the HTML
+alternative. Outgoing attachments are validated centrally (default max 10 files,
+10 MB decoded total, no path separators/control characters in filenames).
+
+| Provider | HTML send/reply/draft | Outgoing attachments | Incoming attachment metadata + download |
+| --- | --- | --- | --- |
+| Proton Bridge / Generic IMAP/SMTP | multipart/alternative (no drafts) | MIME multipart/mixed | Yes (id = MIME order of the parsed message) |
+| Gmail | multipart/alternative | MIME; messages > 3 MB use the RFC 822 media upload | Yes (id = MIME partId) |
+| Microsoft Graph | HTML body (see note) | Inline file attachments up to 2.5 MB total; larger via draft + upload sessions | File attachments only (item/reference attachments return `NOT_SUPPORTED`) |
+| AgentMail | `html` field | `attachments` (base64) on send, reply, draft | Yes (bytes or pre-signed `download_url`) |
+| Resend | `html` field (send only) | `attachments` (base64) on send | Yes for inbound-enabled accounts (pre-signed `download_url`) |
+
+Notes:
+
+- Microsoft Graph replies: plain-text replies keep using `comment` (original
+  message quoted by Exchange). With `html`, Graph only accepts a full
+  `message.body`, so the HTML replaces the body and the original is not quoted.
+- Microsoft Graph only lists attachments when `hasAttachments` is true, so
+  messages that carry nothing but inline images report no attachments.
+- Bcc is never written into SMTP message headers; Gmail receives it in the raw
+  source as its API requires and strips it on delivery.
+
 ## Generic IMAP/SMTP
 
 Use an app-specific password where the mail provider supports one. Configure

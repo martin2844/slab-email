@@ -96,6 +96,8 @@ export interface UpdateAccountInput {
   inboxId?: string;
   baseUrl?: string;
   inboundEnabled?: boolean;
+  /** Per-account rolling-24h cap for new sends; null resets to the env default. */
+  dailySendLimit?: number | null;
 }
 
 export interface UpdateAccountSecrets {

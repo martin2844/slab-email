@@ -20,19 +20,19 @@ describe('database lifecycle', () => {
     try {
       expect(database.getMigrationStatus()).toEqual({
         ready: false,
-        expected: [1, 2, 3, 4, 5, 6],
+        expected: [1, 2, 3, 4, 5, 6, 7],
         applied: [],
-        pending: [1, 2, 3, 4, 5, 6]
+        pending: [1, 2, 3, 4, 5, 6, 7]
       });
       database.migrate();
       expect(database.getMigrationStatus()).toEqual({
         ready: true,
-        expected: [1, 2, 3, 4, 5, 6],
-        applied: [1, 2, 3, 4, 5, 6],
+        expected: [1, 2, 3, 4, 5, 6, 7],
+        applied: [1, 2, 3, 4, 5, 6, 7],
         pending: []
       });
       database.migrate();
-      expect(database.getMigrationStatus().applied).toEqual([1, 2, 3, 4, 5, 6]);
+      expect(database.getMigrationStatus().applied).toEqual([1, 2, 3, 4, 5, 6, 7]);
     } finally {
       database.close();
     }
@@ -66,7 +66,7 @@ describe('database lifecycle', () => {
     const migrated = new DatabaseService(path);
     try {
       expect(migrated.getEmailAccountById('legacy')?.provider).toBe('gmail');
-      expect(migrated.getMigrationStatus()).toMatchObject({ ready: true, applied: [1, 2, 3, 4, 5, 6] });
+      expect(migrated.getMigrationStatus()).toMatchObject({ ready: true, applied: [1, 2, 3, 4, 5, 6, 7] });
       migrated.upsertEmailAccount({
         id: 'agentmail', provider: 'agentmail', emailAddress: 'agent@agentmail.to',
         displayName: 'Agent', enabled: true,
@@ -109,11 +109,54 @@ describe('database lifecycle', () => {
     try {
       expect(migrated.getMigrationStatus()).toMatchObject({
         ready: true,
-        applied: [1, 2, 3, 4, 5, 6]
+        applied: [1, 2, 3, 4, 5, 6, 7]
       });
       expect(
         migrated.getAuditForOperation('legacy-account', 'legacy-ambiguous')?.status
       ).toBe('unknown');
+    } finally {
+      migrated.close();
+    }
+  });
+
+  it('upgrades a v6 database: suppression table plus send-attempt operation backfill', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'slab-email-v6-'));
+    directories.push(directory);
+    const path = join(directory, 'email.db');
+    new DatabaseService(path).close();
+    const legacy = new Database(path);
+    // Rewind the schema to version 6.
+    legacy.exec(`
+      DELETE FROM schema_migrations WHERE version = 7;
+      DROP TABLE email_suppressions;
+      DROP INDEX idx_send_attempts_account_operation_time;
+      DROP TABLE send_attempts;
+      CREATE TABLE send_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id TEXT NOT NULL,
+        attempted_at TEXT NOT NULL,
+        FOREIGN KEY(account_id) REFERENCES email_accounts(id) ON DELETE CASCADE
+      );
+      CREATE INDEX idx_send_attempts_account_time ON send_attempts(account_id, attempted_at);
+      INSERT INTO email_accounts (id, provider, email_address, display_name, enabled, config_json, created_at, updated_at)
+        VALUES ('acc', 'resend', 'ops@example.com', 'Ops', 1, '{}', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z');
+      INSERT INTO send_operations (account_id, idempotency_key, operation, status, created_at, updated_at) VALUES
+        ('acc', 'k1', 'send', 'sent', '2026-11-09T01:00:00.000Z', '2026-11-09T01:00:00.000Z'),
+        ('acc', 'k2', 'reply', 'sent', '2026-11-09T02:00:00.000Z', '2026-11-09T02:00:00.000Z');
+      INSERT INTO send_attempts (account_id, attempted_at) VALUES
+        ('acc', '2026-11-09T01:00:00.000Z'),
+        ('acc', '2026-11-09T02:00:00.000Z'),
+        ('acc', '2026-11-09T03:00:00.000Z');
+    `);
+    legacy.close();
+
+    const migrated = new DatabaseService(path);
+    try {
+      expect(migrated.getMigrationStatus()).toMatchObject({ ready: true, pending: [] });
+      expect(migrated.listSendAttemptTimes('acc', 'send', '2026-11-08T00:00:00Z')).toEqual(['2026-11-09T01:00:00.000Z']);
+      expect(migrated.listSendAttemptTimes('acc', 'reply', '2026-11-08T00:00:00Z')).toEqual(['2026-11-09T02:00:00.000Z']);
+      expect(migrated.countRecentSendAttempts('acc', '2026-11-08T00:00:00Z')).toBe(3);
+      expect(migrated.addSuppression({ kind: 'address', value: 'x@example.com', reason: 'stop', source: 'admin' }).created).toBe(true);
     } finally {
       migrated.close();
     }

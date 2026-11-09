@@ -8,7 +8,8 @@ import {
   SendInput,
   ConnectionStatus,
   AccountCapabilities,
-  ProviderType
+  ProviderType,
+  ProviderAttachment
 } from '../types/models.js';
 
 export interface ProviderConnectionConfig {
@@ -32,4 +33,6 @@ export interface Provider {
   createDraft(input: DraftInput): Promise<{ draftId: string; threadId?: string | null }>;
   sendMessage(input: SendInput): Promise<ProviderSendResult>;
   replyToMessage(input: ReplyInput): Promise<ProviderSendResult>;
+  /** Optional: providers without attachment download support omit this. */
+  getAttachment?(accountId: string, messageId: string, attachmentId: string): Promise<ProviderAttachment>;
 }

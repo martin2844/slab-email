@@ -1,17 +1,23 @@
 import { google, gmail_v1 } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
 import crypto from 'node:crypto';
+import { Readable } from 'node:stream';
 import {
+  AttachmentMetadata,
   DraftInput,
   EmailAddress,
   EmailMessage,
   EmailMessageCompact,
   MessageSearchParams,
+  OutgoingAttachment,
+  ProviderAttachment,
   ProviderSendResult,
   ReplyInput,
   SendInput
 } from '../../types/models.js';
+import { attachmentNotFound, decodeBase64Url as decodeBase64UrlBytes } from '../../utils/attachments.js';
 import { clampText, firstTextOrBody } from '../../utils/message.js';
+import { buildMimeMessage } from '../../utils/mime.js';
 import { Provider } from '../types.js';
 
 const SEARCH_DEFAULT = 20;
@@ -33,11 +39,16 @@ interface GmailMessageRow {
 }
 
 interface GmailPayloadPart {
-  mimeType?: string;
+  partId?: string | null;
+  mimeType?: string | null;
+  filename?: string | null;
+  headers?: GmailMessageHeader[] | null;
   body?: {
     data?: string | null;
-  };
-  parts?: GmailPayloadPart[];
+    attachmentId?: string | null;
+    size?: number | null;
+  } | null;
+  parts?: GmailPayloadPart[] | null;
 }
 
 interface GmailRawMessage {
@@ -46,13 +57,34 @@ interface GmailRawMessage {
   snippet?: string;
   internalDate?: string | number | null;
   labelIds?: string[];
-  payload?: {
-    headers?: GmailMessageHeader[];
-    mimeType?: string;
-    body?: { data?: string | null };
-    parts?: GmailPayloadPart[];
-  };
+  payload?: GmailPayloadPart;
 }
+
+/** Collects attachment parts (parts with a filename). The attachment id is the MIME partId. */
+export const collectGmailAttachmentParts = (
+  payload?: GmailPayloadPart | null
+): Array<{ part: GmailPayloadPart; metadata: AttachmentMetadata }> => {
+  const out: Array<{ part: GmailPayloadPart; metadata: AttachmentMetadata }> = [];
+  const walk = (node?: GmailPayloadPart | null) => {
+    if (!node) return;
+    if (node.filename && node.partId && (node.body?.attachmentId || node.body?.data)) {
+      const disposition = getHeader(node.headers ?? undefined, 'Content-Disposition') ?? '';
+      out.push({
+        part: node,
+        metadata: {
+          id: node.partId,
+          filename: node.filename,
+          contentType: (node.mimeType || 'application/octet-stream').toLowerCase(),
+          size: node.body?.size ?? 0,
+          inline: /^\s*inline/i.test(disposition)
+        }
+      });
+    }
+    for (const child of node.parts ?? []) walk(child);
+  };
+  walk(payload);
+  return out;
+};
 
 const getHeader = (
   headers: GmailMessageHeader[] | undefined,
@@ -123,7 +155,7 @@ const extractBody = (payload?: GmailRawMessage['payload']): { text: string; html
   return walk(payload);
 };
 
-const buildMailHeaders = (params: {
+const buildRawMessage = async (params: {
   fromName: string;
   fromAddress: string;
   to: EmailAddress[];
@@ -132,34 +164,48 @@ const buildMailHeaders = (params: {
   subject: string;
   text: string;
   html?: string;
+  attachments?: OutgoingAttachment[];
   inReplyTo?: string;
   references?: string;
   idempotencyKey?: string;
-}): string => {
-  const headers = [
-    `From: ${params.fromName ? `${params.fromName} <${params.fromAddress}>` : params.fromAddress}`,
-    `To: ${params.to.map((entry) => (entry.name ? `${entry.name} <${entry.address}>` : entry.address)).join(', ')}`,
-    params.cc?.length
-      ? `Cc: ${params.cc.map((entry) => (entry.name ? `${entry.name} <${entry.address}>` : entry.address)).join(', ')}`
-      : '',
-    params.bcc?.length
-      ? `Bcc: ${params.bcc.map((entry) => (entry.name ? `${entry.name} <${entry.address}>` : entry.address)).join(', ')}`
-      : '',
-    `Subject: ${params.subject}`,
-    `Date: ${new Date().toUTCString()}`,
-    'MIME-Version: 1.0',
-    'Content-Type: text/plain; charset=utf-8',
-    params.inReplyTo ? `In-Reply-To: ${params.inReplyTo}` : '',
-    params.references ? `References: ${params.references}` : '',
-    params.idempotencyKey ? `X-Slab-Email-Idempotency-Key: ${params.idempotencyKey}` : ''
-  ].filter(Boolean).join('\n');
-
-  const body = params.html ? `${params.text}\n\n${params.html}` : params.text;
-  return `${headers}\n\n${body}`;
+}): Promise<Buffer> => {
+  return buildMimeMessage({
+    from: { name: params.fromName || undefined, address: params.fromAddress },
+    to: params.to,
+    cc: params.cc,
+    bcc: params.bcc,
+    subject: params.subject,
+    text: params.text,
+    html: params.html,
+    attachments: params.attachments,
+    inReplyTo: params.inReplyTo,
+    references: params.references,
+    headers: params.idempotencyKey
+      ? { 'X-Slab-Email-Idempotency-Key': params.idempotencyKey }
+      : undefined,
+    // Gmail reads Bcc from the raw source to deliver, then strips it.
+    keepBcc: true
+  });
 };
 
-const base64UrlEncode = (value: string): string =>
-  Buffer.from(value, 'utf8')
+// Gmail rejects JSON metadata requests above ~5 MB; larger messages go through
+// the RFC 822 media upload endpoint (up to 35 MB).
+const GMAIL_INLINE_RAW_MAX_BYTES = 3 * 1024 * 1024;
+
+export const gmailMessageUpload = (
+  raw: Buffer,
+  threadId?: string
+): {
+  raw?: string;
+  threadId?: string;
+  media?: { mimeType: string; body: Readable };
+} =>
+  raw.length <= GMAIL_INLINE_RAW_MAX_BYTES
+    ? { raw: base64UrlEncode(raw), threadId }
+    : { threadId, media: { mimeType: 'message/rfc822', body: Readable.from(raw) } };
+
+const base64UrlEncode = (value: Buffer): string =>
+  value
     .toString('base64')
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
@@ -359,6 +405,9 @@ export class GmailProvider implements Provider {
       unread: !(response.data.labelIds ?? []).includes('UNREAD'),
       text: body.text,
       html: body.html,
+      attachments: collectGmailAttachmentParts(response.data.payload as GmailPayloadPart).map(
+        ({ metadata }) => metadata
+      ),
       headers: headers.reduce<GmailHeaders>((acc, entry) => {
         const headerName = entry.name;
         if (headerName) {
@@ -384,22 +433,23 @@ export class GmailProvider implements Provider {
 
   async createDraft(input: DraftInput): Promise<{ draftId: string; threadId?: string | null }> {
     const gmail = await this.getGmailClient();
-    const raw = base64UrlEncode(
-      buildMailHeaders({
-        fromName: this.config.displayName,
-        fromAddress: this.config.emailAddress,
-        to: input.to,
-        cc: input.cc,
-        bcc: input.bcc,
-        subject: input.subject,
-        text: input.text,
-        html: input.html
-      })
-    );
+    const raw = await buildRawMessage({
+      fromName: this.config.displayName,
+      fromAddress: this.config.emailAddress,
+      to: input.to,
+      cc: input.cc,
+      bcc: input.bcc,
+      subject: input.subject,
+      text: input.text,
+      html: input.html,
+      attachments: input.attachments
+    });
 
+    const upload = gmailMessageUpload(raw);
     const draft = await gmail.users.drafts.create({
       userId: 'me',
-      requestBody: { message: { raw } }
+      requestBody: { message: { raw: upload.raw } },
+      media: upload.media
     });
 
     return {
@@ -410,24 +460,25 @@ export class GmailProvider implements Provider {
 
   async sendMessage(input: SendInput): Promise<ProviderSendResult> {
     const gmail = await this.getGmailClient();
-    const raw = base64UrlEncode(
-      buildMailHeaders({
-        fromName: this.config.displayName,
-        fromAddress: this.config.emailAddress,
-        to: input.to,
-        cc: input.cc,
-        bcc: input.bcc,
-        subject: input.subject,
-        text: input.text,
-        html: input.html,
-        idempotencyKey: input.idempotencyKey
-      })
-    );
+    const raw = await buildRawMessage({
+      fromName: this.config.displayName,
+      fromAddress: this.config.emailAddress,
+      to: input.to,
+      cc: input.cc,
+      bcc: input.bcc,
+      subject: input.subject,
+      text: input.text,
+      html: input.html,
+      attachments: input.attachments,
+      idempotencyKey: input.idempotencyKey
+    });
 
     try {
+      const upload = gmailMessageUpload(raw);
       const response = await gmail.users.messages.send({
         userId: 'me',
-        requestBody: { raw }
+        requestBody: { raw: upload.raw },
+        media: upload.media
       });
       return {
         status: 'sent',
@@ -448,28 +499,26 @@ export class GmailProvider implements Provider {
     const refs = [...(original.references ?? []), original.messageId ?? '', original.inReplyTo ?? ''].filter(Boolean);
     const subject = /^re:/i.test(original.subject) ? original.subject : `Re: ${original.subject}`;
 
-    const raw = base64UrlEncode(
-      buildMailHeaders({
-        fromName: this.config.displayName,
-        fromAddress: this.config.emailAddress,
-        to,
-        cc,
-        subject,
-        text: input.text,
-        html: input.html,
-        inReplyTo: original.messageId,
-        references: refs.join(' '),
-        idempotencyKey: input.idempotencyKey
-      })
-    );
+    const raw = await buildRawMessage({
+      fromName: this.config.displayName,
+      fromAddress: this.config.emailAddress,
+      to,
+      cc,
+      subject,
+      text: input.text,
+      html: input.html,
+      attachments: input.attachments,
+      inReplyTo: original.messageId,
+      references: refs.join(' '),
+      idempotencyKey: input.idempotencyKey
+    });
 
     try {
+      const upload = gmailMessageUpload(raw, original.threadId ?? undefined);
       const response = await gmail.users.messages.send({
         userId: 'me',
-        requestBody: {
-          threadId: original.threadId ?? undefined,
-          raw
-        }
+        requestBody: { threadId: upload.threadId, raw: upload.raw },
+        media: upload.media
       });
       return {
         status: 'sent',
@@ -479,6 +528,31 @@ export class GmailProvider implements Provider {
     } catch (error) {
       return formatProviderError(error);
     }
+  }
+
+  async getAttachment(_accountId: string, messageId: string, attachmentId: string): Promise<ProviderAttachment> {
+    const gmail = await this.getGmailClient();
+    const response = await gmail.users.messages.get({ userId: 'me', id: messageId, format: 'full' });
+    const match = collectGmailAttachmentParts(response.data.payload as GmailPayloadPart).find(
+      ({ metadata }) => metadata.id === attachmentId
+    );
+    if (!match) throw attachmentNotFound(attachmentId);
+    const { part, metadata } = match;
+    return {
+      id: metadata.id,
+      filename: metadata.filename,
+      contentType: metadata.contentType,
+      size: metadata.size,
+      load: async () => {
+        if (part.body?.data) return decodeBase64UrlBytes(part.body.data);
+        const attachment = await gmail.users.messages.attachments.get({
+          userId: 'me',
+          messageId,
+          id: part.body?.attachmentId ?? ''
+        });
+        return decodeBase64UrlBytes(attachment.data.data ?? '');
+      }
+    };
   }
 
   static buildAuthorizationUrl(opts: {

@@ -61,6 +61,10 @@ slab-agents (REST/MCP) -> slab-email
 - Connector-scoped permissions:
   - read / draft / send.
 - Idempotent send/reply with `idempotencyKey`.
+- HTML bodies (`html`, sent as multipart/alternative with the required `text`) and
+  outgoing attachments on send/reply/draft; incoming attachment metadata and download.
+- Outreach safety: persistent opt-out (suppression) list enforced on new sends and a
+  per-account rolling 24h cap on new (non-reply) emails.
 - Threaded read/list payloads and full message hydration.
 - Encrypted secrets using `AES-256-GCM`.
 - Access tokens scoped to profiles.
@@ -124,7 +128,15 @@ Required / relevant environment variables:
 - `MICROSOFT_CLIENT_SECRET_FILE` (mounted-file alternative)
 - `MICROSOFT_REDIRECT_URI` (default `http://127.0.0.1:6981/api/oauth/microsoft/callback`)
 - `MICROSOFT_TENANT` (default `common`)
-- `MAX_SENDS_PER_ACCOUNT_PER_HOUR` (default `60`)
+- `MAX_SENDS_PER_ACCOUNT_PER_HOUR` (default `60`; sends + replies)
+- `MAX_NEW_SENDS_PER_ACCOUNT_PER_DAY` (default `50`; rolling 24h cap on `email_send`
+  only, replies excluded; `0` blocks new sends; per-account override via
+  `PATCH /api/accounts/:id {"dailySendLimit": n}`, `null` resets)
+- `MAX_OUTGOING_ATTACHMENTS` (default `10` files per message)
+- `MAX_OUTGOING_ATTACHMENT_BYTES` (default `10485760`, decoded total per message; also
+  sizes the JSON body limit)
+- `MAX_ATTACHMENT_TEXT_BYTES` (default `204800`; text-like attachments are truncated)
+- `MAX_ATTACHMENT_BASE64_BYTES` (default `5242880`; larger binary attachments are refused)
 - `INBOUND_POLL_INTERVAL_SECONDS` (default `30`; `0` disables inbound discovery)
 - `MCP_ALLOWED_ORIGINS` (comma-separated)
 - `MCP_ALLOWED_ORIGINS_HOSTS` (comma-separated)
@@ -219,6 +231,8 @@ Tools:
 - `email_create_draft`
 - `email_send`
 - `email_reply`
+- `email_get_attachment`
+- `email_suppress`
 
 See [docs/mcp.md](docs/mcp.md) for tool payloads and usage.
 
@@ -231,6 +245,8 @@ See [docs/mcp.md](docs/mcp.md) for tool payloads and usage.
 - Send is idempotent by `(accountId, idempotencyKey)`.
 - Unknown send outcomes are surfaced as `SEND_OUTCOME_UNKNOWN` and never auto-retried blindly.
 - Per-account send throttling default: `MAX_SENDS_PER_ACCOUNT_PER_HOUR`.
+- New (non-reply) sends are capped per rolling 24h (`MAX_NEW_SENDS_PER_ACCOUNT_PER_DAY`)
+  and refused when any recipient is on the suppression list.
 - Logs redact likely sensitive keys.
 
 ## Data model
@@ -240,6 +256,8 @@ See [docs/mcp.md](docs/mcp.md) for tool payloads and usage.
 - `access_profiles` + `access_profile_accounts`.
 - `access_tokens`: hashed connector tokens.
 - `send_operations`: status + audit fields and `idempotency_key`.
+- `send_attempts`: per-attempt ledger (with operation) for hourly and daily limits.
+- `email_suppressions`: opt-out list (addresses and domains) shared by all accounts.
 - `inbound_seen_messages`: per-account message IDs used for durable deduplication.
 - `inbound_events`: append-only metadata notifications for newly discovered mail.
 - `inbound_poll_state`: baseline, checkpoint, and last-error state per account.
@@ -275,10 +293,11 @@ Domain tests cover:
 - Send idempotency
 - Unknown send outcome behavior
 - MCP auth/scoping/tool execution
+- Suppression refusal, daily cap, attachment validation/content, HTML multipart
 
 ## Limitations (MVP)
 
-- No attachments support.
+- Attachment limits: see Configuration; per-provider notes in [docs/providers.md](docs/providers.md).
 - No mailbox replication, local full-text search index, or webhook push sync. A bounded
   metadata-only poller emits durable notifications for new inbound mail.
 - No batching/outbound campaign workflows.

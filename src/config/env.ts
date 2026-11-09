@@ -33,6 +33,11 @@ const envSchema = z.object({
   MICROSOFT_TENANT: z.string().trim().default('common'),
   LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('info'),
   MAX_SENDS_PER_ACCOUNT_PER_HOUR: z.coerce.number().int().min(1).max(10_000).default(60),
+  MAX_NEW_SENDS_PER_ACCOUNT_PER_DAY: z.coerce.number().int().min(0).max(100_000).default(50),
+  MAX_OUTGOING_ATTACHMENTS: z.coerce.number().int().min(0).max(100).default(10),
+  MAX_OUTGOING_ATTACHMENT_BYTES: z.coerce.number().int().min(0).max(100 * 1024 * 1024).default(10 * 1024 * 1024),
+  MAX_ATTACHMENT_TEXT_BYTES: z.coerce.number().int().min(1).max(50 * 1024 * 1024).default(200 * 1024),
+  MAX_ATTACHMENT_BASE64_BYTES: z.coerce.number().int().min(0).max(100 * 1024 * 1024).default(5 * 1024 * 1024),
   INBOUND_POLL_INTERVAL_SECONDS: z.coerce.number().int().min(0).max(3600).default(30),
   MCP_ALLOWED_ORIGINS: z.preprocess(parseCsv, z.array(z.string()).default(['127.0.0.1:6981'])),
   MCP_ALLOWED_ORIGINS_HOSTS: z
@@ -86,6 +91,15 @@ export interface RuntimeConfig {
   microsoftTenant: string;
   logLevel: 'error' | 'warn' | 'info' | 'debug';
   maxSendsPerAccountPerHour: number;
+  /** Rolling 24h cap for new (non-reply) sends per account. */
+  maxNewSendsPerAccountPerDay: number;
+  maxOutgoingAttachments: number;
+  /** Max total decoded bytes of outgoing attachments per message. */
+  maxOutgoingAttachmentBytes: number;
+  /** Text-like attachments are truncated to this many bytes. */
+  maxAttachmentTextBytes: number;
+  /** Binary attachments larger than this are refused by email_get_attachment. */
+  maxAttachmentBase64Bytes: number;
   inboundPollIntervalMs: number;
   mcpAllowedOrigins: string[];
   mcpAllowedHostnames: string[];
@@ -181,6 +195,11 @@ export const loadConfig = (
     microsoftTenant: parsed.MICROSOFT_TENANT,
     logLevel: parsed.LOG_LEVEL,
     maxSendsPerAccountPerHour: parsed.MAX_SENDS_PER_ACCOUNT_PER_HOUR,
+    maxNewSendsPerAccountPerDay: parsed.MAX_NEW_SENDS_PER_ACCOUNT_PER_DAY,
+    maxOutgoingAttachments: parsed.MAX_OUTGOING_ATTACHMENTS,
+    maxOutgoingAttachmentBytes: parsed.MAX_OUTGOING_ATTACHMENT_BYTES,
+    maxAttachmentTextBytes: parsed.MAX_ATTACHMENT_TEXT_BYTES,
+    maxAttachmentBase64Bytes: parsed.MAX_ATTACHMENT_BASE64_BYTES,
     inboundPollIntervalMs: parsed.INBOUND_POLL_INTERVAL_SECONDS * 1000,
     mcpAllowedOrigins: parsed.MCP_ALLOWED_ORIGINS,
     mcpAllowedHostnames: parsed.MCP_ALLOWED_ORIGINS_HOSTS,

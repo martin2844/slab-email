@@ -13,6 +13,8 @@ import { AccountService } from './services/account-service.js';
 import { MailService } from './services/mail-service.js';
 import {
   accessProfileSchema,
+  adminSuppressionSchema,
+  connectorSuppressSchema,
   createImapSmtpAccountSchema,
   createAgentMailAccountSchema,
   createResendAccountSchema,
@@ -140,7 +142,12 @@ export const createApp = (ctx: AppContext): express.Express => {
   const app = express();
   const mcpOriginSet = buildOriginMatcher(ctx.config.mcpAllowedOrigins);
 
-  app.use(express.json({ limit: '1mb' }));
+  // Base64 attachments inflate payloads by 4/3; leave 1 MB for the rest of the body.
+  const jsonLimitBytes = Math.max(
+    1024 * 1024,
+    Math.ceil((ctx.config.maxOutgoingAttachmentBytes * 4) / 3) + 1024 * 1024
+  );
+  app.use(express.json({ limit: jsonLimitBytes }));
 
   app.get('/health', (_req, res) => {
     res.status(200).json({ status: 'ok' });
@@ -571,6 +578,40 @@ export const createApp = (ctx: AppContext): express.Express => {
     }
   });
 
+  adminRouter.get('/suppressions', adminAuth, (req, res, next) => {
+    try {
+      const query = z.object({ q: z.string().trim().max(320).optional() }).parse(normalizeQuery(req.query));
+      res.status(200).json({ items: ctx.mailService.suppressions.list({ query: query.q }) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  adminRouter.post('/suppressions', adminAuth, (req, res, next) => {
+    try {
+      const payload = adminSuppressionSchema.parse(req.body ?? {});
+      const result = ctx.mailService.suppressions.add({
+        kind: payload.domain ? 'domain' : 'address',
+        value: (payload.domain ?? payload.address)!,
+        reason: payload.reason,
+        source: 'admin'
+      });
+      res.status(result.created ? 201 : 200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  adminRouter.delete('/suppressions/:id', adminAuth, (req, res, next) => {
+    try {
+      const id = z.coerce.number().int().positive().parse(safeParam(req.params as Record<string, string | string[]>, 'id'));
+      ctx.mailService.suppressions.remove(id);
+      res.status(204).send();
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.use('/api', adminRouter);
 
   const mailRouter = express.Router();
@@ -608,6 +649,31 @@ export const createApp = (ctx: AppContext): express.Express => {
     }
   });
 
+  mailRouter.get('/mail/messages/:accountId/:messageId/attachments/:attachmentId', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const params = req.params as Record<string, string | string[]>;
+      const result = await ctx.mailService.getAttachment(
+        req,
+        safeParam(params, 'accountId'),
+        safeParam(params, 'messageId'),
+        safeParam(params, 'attachmentId')
+      );
+      res.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  mailRouter.post('/mail/suppressions', (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const payload = connectorSuppressSchema.parse(req.body ?? {});
+      const result = ctx.mailService.suppress(req, payload);
+      res.status(result.created ? 201 : 200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   mailRouter.get('/mail/threads/:accountId/:threadId', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
       const accountId = safeParam(req.params as Record<string, string | string[]>, 'accountId');
@@ -629,7 +695,8 @@ export const createApp = (ctx: AppContext): express.Express => {
         bcc: payload.bcc?.map((address) => ({ address, name: undefined })),
         subject: payload.subject,
         text: payload.text,
-        html: payload.html
+        html: payload.html,
+        attachments: payload.attachments
       });
       res.status(200).json(result);
     } catch (error) {
@@ -648,6 +715,7 @@ export const createApp = (ctx: AppContext): express.Express => {
         subject: payload.subject,
         text: payload.text,
         html: payload.html,
+        attachments: payload.attachments,
         expectedFrom: payload.expectedFrom,
         idempotencyKey: payload.idempotencyKey
       });
@@ -669,6 +737,7 @@ export const createApp = (ctx: AppContext): express.Express => {
         cc: payload.cc?.map((address) => ({ address, name: undefined })),
         text: payload.text,
         html: payload.html,
+        attachments: payload.attachments,
         replyAll: payload.replyAll,
         idempotencyKey: payload.idempotencyKey
       });
@@ -704,8 +773,8 @@ export const createApp = (ctx: AppContext): express.Express => {
     const deniedCapability =
       (requestedTool === 'email_create_draft' && !profile?.draftEnabled) ||
       (['email_send', 'email_reply'].includes(requestedTool ?? '') && !profile?.sendEnabled) ||
-      (['email_search', 'email_get_message', 'email_list_threads'].includes(requestedTool ?? '') && !profile?.readEnabled) ||
-      (requestedTool === 'email_list_accounts' &&
+      (['email_search', 'email_get_message', 'email_get_attachment', 'email_list_threads'].includes(requestedTool ?? '') && !profile?.readEnabled) ||
+      (['email_list_accounts', 'email_suppress'].includes(requestedTool ?? '') &&
         !profile?.readEnabled &&
         !profile?.draftEnabled &&
         !profile?.sendEnabled);

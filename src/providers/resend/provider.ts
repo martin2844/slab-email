@@ -1,14 +1,21 @@
 import {
   AccountCapabilities, DraftInput, EmailMessage, EmailMessageCompact, MessageSearchParams,
-  ProviderSendResult, ReplyInput, SendInput,
+  ProviderAttachment, ProviderSendResult, ReplyInput, SendInput,
 } from '../../types/models.js';
+import { attachmentNotFound } from '../../utils/attachments.js';
 import { clampText } from '../../utils/message.js';
-import { formatAddress, parseAddress, providerJson } from '../http-json.js';
+import { ProviderHttpError, downloadSignedUrl, formatAddress, parseAddress, providerJson } from '../http-json.js';
 import { Provider } from '../types.js';
 
 type ResendMessage = {
   id: string; message_id?: string; from: string; to: string[]; cc?: string[]; bcc?: string[];
   received_for?: string[]; subject?: string; created_at: string; text?: string | null; html?: string | null; headers?: Record<string, string>;
+  attachments?: ResendAttachment[];
+};
+
+type ResendAttachment = {
+  id: string; filename?: string; content_type?: string; size?: number;
+  content_disposition?: string; download_url?: string;
 };
 
 export type ResendProviderConfig = {
@@ -78,6 +85,36 @@ export class ResendProvider implements Provider {
       ...this.compact(accountId, message), provider: 'resend', messageId: message.message_id,
       cc: (message.cc ?? []).map(parseAddress), bcc: (message.bcc ?? []).map(parseAddress),
       text: message.text || undefined, html: message.html || undefined, headers: message.headers,
+      attachments: (message.attachments ?? []).map((attachment) => ({
+        id: attachment.id,
+        filename: attachment.filename || 'attachment',
+        contentType: (attachment.content_type || 'application/octet-stream').toLowerCase(),
+        size: attachment.size ?? 0,
+        inline: attachment.content_disposition === 'inline',
+      })),
+    };
+  }
+
+  async getAttachment(accountId: string, messageId: string, attachmentId: string): Promise<ProviderAttachment> {
+    // Enforces the account scope check before exposing any attachment.
+    await this.getMessage(accountId, messageId);
+    let attachment: ResendAttachment;
+    try {
+      attachment = await this.request<ResendAttachment>(
+        `/emails/receiving/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
+      );
+    } catch (error) {
+      if (error instanceof ProviderHttpError && error.status === 404) throw attachmentNotFound(attachmentId);
+      throw error;
+    }
+    if (!attachment.download_url) throw new Error('Resend did not return an attachment download URL');
+    const downloadUrl = attachment.download_url;
+    return {
+      id: attachment.id,
+      filename: attachment.filename || 'attachment',
+      contentType: (attachment.content_type || 'application/octet-stream').toLowerCase(),
+      size: attachment.size,
+      load: () => downloadSignedUrl(downloadUrl),
     };
   }
 
@@ -91,6 +128,9 @@ export class ResendProvider implements Provider {
         from: formatAddress({ name: this.config.displayName, address: this.config.emailAddress }),
         to: input.to.map(formatAddress), cc: input.cc?.map(formatAddress), bcc: input.bcc?.map(formatAddress),
         subject: input.subject, text: input.text, html: input.html,
+        attachments: input.attachments?.map((attachment) => ({
+          filename: attachment.filename, content: attachment.contentBase64, content_type: attachment.contentType,
+        })),
       }),
     });
     return { status: 'sent', providerMessageId: sent.id };

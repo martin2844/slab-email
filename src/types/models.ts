@@ -45,6 +45,52 @@ export interface EmailMessage {
   text?: string;
   html?: string;
   headers?: Record<string, string>;
+  attachments?: AttachmentMetadata[];
+}
+
+/** Metadata for an attachment of a received/stored message. */
+export interface AttachmentMetadata {
+  id: string;
+  filename: string;
+  contentType: string;
+  size: number;
+  inline?: boolean;
+}
+
+/**
+ * Attachment handle returned by providers. `load()` downloads the content, so
+ * callers can reject oversized attachments before transferring them.
+ */
+export interface ProviderAttachment {
+  id: string;
+  filename: string;
+  contentType: string;
+  size?: number;
+  load(): Promise<Buffer>;
+}
+
+export interface AttachmentContent {
+  id: string;
+  filename: string;
+  contentType: string;
+  size: number;
+  encoding: 'text' | 'base64';
+  content: string;
+  truncated: boolean;
+}
+
+/** Validated outgoing attachment (base64 normalized, decoded size known). */
+export interface OutgoingAttachment {
+  filename: string;
+  contentType: string;
+  contentBase64: string;
+  size: number;
+}
+
+export interface OutgoingAttachmentInput {
+  filename: string;
+  contentType: string;
+  contentBase64: string;
 }
 
 export interface EmailMessageCompact {
@@ -81,6 +127,7 @@ export interface DraftInput {
   subject: string;
   text: string;
   html?: string;
+  attachments?: OutgoingAttachment[];
 }
 
 export interface SendInput extends DraftInput {
@@ -97,6 +144,7 @@ export interface ReplyInput {
   cc?: EmailAddress[];
   text: string;
   html?: string;
+  attachments?: OutgoingAttachment[];
   replyAll?: boolean;
   idempotencyKey: string;
 }
@@ -125,6 +173,21 @@ export interface ConnectionStatus {
 export interface AccountConfigCommon {
   emailAddress: string;
   displayName: string;
+  /** Per-account override of the rolling 24h cap for new (non-reply) sends. */
+  dailySendLimit?: number | null;
+}
+
+export type SuppressionKind = 'address' | 'domain';
+
+export interface SuppressionEntry {
+  id: number;
+  kind: SuppressionKind;
+  value: string;
+  reason: string;
+  source: string;
+  accountId?: string | null;
+  profileId?: string | null;
+  createdAt: string;
 }
 
 export interface ImapSmtpAccountConfig extends AccountConfigCommon {

@@ -4,12 +4,15 @@ import {
   EmailMessage,
   EmailMessageCompact,
   MessageSearchParams,
+  OutgoingAttachment,
+  ProviderAttachment,
   ProviderSendResult,
   ReplyInput,
   SendInput,
 } from '../../types/models.js';
+import { attachmentNotFound } from '../../utils/attachments.js';
 import { clampText } from '../../utils/message.js';
-import { formatAddress, parseAddress, providerJson } from '../http-json.js';
+import { ProviderHttpError, downloadSignedUrl, formatAddress, parseAddress, providerBinary, providerJson } from '../http-json.js';
 import { Provider } from '../types.js';
 
 type AgentMailMessage = {
@@ -30,7 +33,27 @@ type AgentMailMessage = {
   in_reply_to?: string;
   references?: string[];
   headers?: Record<string, string>;
+  attachments?: AgentMailAttachment[];
 };
+
+type AgentMailAttachment = {
+  attachment_id: string;
+  filename?: string;
+  size?: number;
+  content_type?: string;
+  content_disposition?: string;
+  inline?: boolean;
+  download_url?: string;
+};
+
+const agentMailAttachments = (attachments?: OutgoingAttachment[]) =>
+  attachments?.length
+    ? attachments.map((attachment) => ({
+        filename: attachment.filename,
+        content_type: attachment.contentType,
+        content: attachment.contentBase64,
+      }))
+    : undefined;
 
 export type AgentMailProviderConfig = {
   emailAddress: string;
@@ -103,6 +126,13 @@ export class AgentMailProvider implements Provider {
       text: message.extracted_text || message.text,
       html: message.html,
       headers: message.headers,
+      attachments: (message.attachments ?? []).map((attachment) => ({
+        id: attachment.attachment_id,
+        filename: attachment.filename || 'attachment',
+        contentType: (attachment.content_type || 'application/octet-stream').toLowerCase(),
+        size: attachment.size ?? 0,
+        inline: attachment.inline === true || attachment.content_disposition === 'inline',
+      })),
     };
   }
 
@@ -134,6 +164,37 @@ export class AgentMailProvider implements Provider {
     return this.full(accountId, message);
   }
 
+  async getAttachment(_accountId: string, messageId: string, attachmentId: string): Promise<ProviderAttachment> {
+    const message = await this.request<AgentMailMessage>(`/messages/${encodeURIComponent(messageId)}`);
+    const metadata = (message.attachments ?? []).find((entry) => entry.attachment_id === attachmentId);
+    if (!metadata) throw attachmentNotFound(attachmentId);
+    const url = this.url(
+      `/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
+    );
+    return {
+      id: metadata.attachment_id,
+      filename: metadata.filename || 'attachment',
+      contentType: (metadata.content_type || 'application/octet-stream').toLowerCase(),
+      size: metadata.size,
+      load: async () => {
+        let response: { data: Buffer; contentType?: string };
+        try {
+          response = await providerBinary(url, { headers: { Authorization: `Bearer ${this.config.apiKey}` } });
+        } catch (error) {
+          if (error instanceof ProviderHttpError && error.status === 404) throw attachmentNotFound(attachmentId);
+          throw error;
+        }
+        // Newer API versions return JSON with a pre-signed download_url; older ones stream the bytes.
+        if (response.contentType?.toLowerCase().includes('application/json') && metadata.content_type !== 'application/json') {
+          const parsed = JSON.parse(response.data.toString('utf8')) as { download_url?: string };
+          if (!parsed.download_url) throw new Error('AgentMail did not return attachment content');
+          return downloadSignedUrl(parsed.download_url);
+        }
+        return response.data;
+      },
+    };
+  }
+
   async getThread(accountId: string, threadId: string) {
     const thread = await this.request<{ messages: AgentMailMessage[] }>(`/threads/${encodeURIComponent(threadId)}`);
     return thread.messages.map((message) => this.full(accountId, message));
@@ -145,6 +206,7 @@ export class AgentMailProvider implements Provider {
       body: JSON.stringify({
         to: input.to.map(formatAddress), cc: input.cc?.map(formatAddress), bcc: input.bcc?.map(formatAddress),
         subject: input.subject, text: input.text, html: input.html,
+        attachments: agentMailAttachments(input.attachments),
       }),
     });
     return { draftId: draft.draft_id, threadId: draft.thread_id };
@@ -156,6 +218,7 @@ export class AgentMailProvider implements Provider {
       body: JSON.stringify({
         to: input.to.map(formatAddress), cc: input.cc?.map(formatAddress), bcc: input.bcc?.map(formatAddress),
         subject: input.subject, text: input.text, html: input.html,
+        attachments: agentMailAttachments(input.attachments),
         headers: { 'X-Slab-Email-Idempotency-Key': input.idempotencyKey },
       }),
     });
@@ -168,6 +231,7 @@ export class AgentMailProvider implements Provider {
       body: JSON.stringify({
         to: input.to?.map(formatAddress), cc: input.cc?.map(formatAddress), reply_all: input.replyAll,
         text: input.text, html: input.html,
+        attachments: agentMailAttachments(input.attachments),
         headers: { 'X-Slab-Email-Idempotency-Key': input.idempotencyKey },
       }),
     });

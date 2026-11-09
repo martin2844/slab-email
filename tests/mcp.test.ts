@@ -444,6 +444,18 @@ describe('MCP endpoint', () => {
         destructiveHint: false,
         idempotentHint: true,
         openWorldHint: true
+      },
+      email_get_attachment: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true
+      },
+      email_suppress: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
       }
     } as const;
     expect(readableTools.map(({ name }) => name).sort()).toEqual(
@@ -458,7 +470,10 @@ describe('MCP endpoint', () => {
       );
     }
     const replyTool = readableTools.find(({ name }) => name === 'email_reply');
-    expect(replyTool?.inputSchema?.properties).not.toHaveProperty('html');
+    // html and attachments are optional additions; reply recipients stay locked.
+    expect(replyTool?.inputSchema?.properties).toHaveProperty('html');
+    expect(replyTool?.inputSchema?.properties).toHaveProperty('attachments');
+    expect(replyTool?.inputSchema?.properties).not.toHaveProperty('cc');
     expect(replyTool?.inputSchema?.properties).not.toHaveProperty('replyAll');
 
     const mismatch = await call(23, 'email_reply', {

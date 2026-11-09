@@ -101,6 +101,9 @@ At run-time, pass connector token to MCP endpoint only.
 
 - No main SMTP account password stored in UI.
 - No connector secrets passed through UI state.
-- No attachment download/upload in MVP.
+- Attachments are bounded: outgoing files are validated (count, total size, safe
+  filenames); downloads return truncated text or size-capped base64 only.
+- New outreach is refused for opted-out recipients (`email_suppress`) and capped
+  per account per rolling 24h; replies are only subject to the hourly limit.
 - Metadata-only inbound discovery runs in the background; message bodies remain
   provider-side and are never persisted in the event feed.

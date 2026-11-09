@@ -102,7 +102,8 @@ export const patchAccountSchema = z
     apiKey: z.string().trim().min(1).max(4096).optional(),
     inboxId: z.string().trim().min(1).max(320).optional(),
     baseUrl: providerBaseUrl.optional(),
-    inboundEnabled: z.boolean().optional()
+    inboundEnabled: z.boolean().optional(),
+    dailySendLimit: z.number().int().min(0).max(100_000).nullable().optional()
   })
   .superRefine((value, ctx) => {
     const hasAnyUpdate = Object.values(value).some((entry) => entry !== undefined);
@@ -177,6 +178,15 @@ export const searchParamsSchema = z.object({
   cursor: z.string().trim().optional()
 });
 
+// Count/size/filename limits are enforced by MailService using configurable limits.
+export const outgoingAttachmentSchema = z.object({
+  filename: z.string().min(1).max(255),
+  contentType: z.string().trim().min(1).max(255),
+  contentBase64: z.string().min(1)
+});
+
+export const outgoingAttachmentsSchema = z.array(outgoingAttachmentSchema).max(100);
+
 export const draftSchema = z.object({
   accountId: z.string().trim().min(1),
   to: emailAddressListSchema.min(1),
@@ -184,7 +194,8 @@ export const draftSchema = z.object({
   bcc: emailAddressListSchema.optional(),
   subject: z.string().trim().min(1),
   text: z.string().trim().min(1),
-  html: z.string().trim().optional()
+  html: z.string().trim().optional(),
+  attachments: outgoingAttachmentsSchema.optional()
 });
 
 export const idempotentSendSchema = draftSchema.extend({
@@ -201,6 +212,28 @@ export const replySchema = z.object({
   cc: emailAddressListSchema.optional(),
   text: z.string().trim().min(1),
   html: z.string().trim().optional(),
+  attachments: outgoingAttachmentsSchema.optional(),
   replyAll: z.boolean().optional(),
   idempotencyKey: z.string().trim().min(1)
 });
+
+export const suppressionScopeSchema = z.enum(['address', 'domain']);
+
+/** Connector (profile token) opt-out recording; same shape as MCP email_suppress. */
+export const connectorSuppressSchema = z.object({
+  address: z.string().trim().min(3).max(320),
+  reason: z.string().trim().min(1).max(1000),
+  scope: suppressionScopeSchema.optional(),
+  accountId: z.string().trim().min(1).optional()
+});
+
+/** Admin add: exactly one of address or domain. */
+export const adminSuppressionSchema = z
+  .object({
+    address: z.string().trim().min(3).max(320).optional(),
+    domain: z.string().trim().min(3).max(253).optional(),
+    reason: z.string().trim().min(1).max(1000)
+  })
+  .refine((value) => Boolean(value.address) !== Boolean(value.domain), {
+    message: 'provide exactly one of address or domain'
+  });

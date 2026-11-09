@@ -1,9 +1,11 @@
 import {
-  AccountCapabilities, DraftInput, EmailAddress, EmailMessage, EmailMessageCompact,
-  MessageSearchParams, ProviderSendResult, ReplyInput, SendInput,
+  AccountCapabilities, AttachmentMetadata, DraftInput, EmailAddress, EmailMessage, EmailMessageCompact,
+  MessageSearchParams, OutgoingAttachment, ProviderAttachment, ProviderSendResult, ReplyInput, SendInput,
 } from '../../types/models.js';
+import { ApiError, ERROR_CODES } from '../../types/errors.js';
+import { attachmentNotFound } from '../../utils/attachments.js';
 import { clampText } from '../../utils/message.js';
-import { providerJson } from '../http-json.js';
+import { ProviderHttpError, providerBinary, providerJson } from '../http-json.js';
 import { Provider } from '../types.js';
 
 type GraphRecipient = { emailAddress?: { name?: string; address?: string } };
@@ -16,6 +18,7 @@ type GraphMessage = {
   subject?: string;
   bodyPreview?: string;
   isRead?: boolean;
+  hasAttachments?: boolean;
   from?: GraphRecipient;
   toRecipients?: GraphRecipient[];
   ccRecipients?: GraphRecipient[];
@@ -23,6 +26,31 @@ type GraphMessage = {
   body?: { contentType?: string; content?: string };
   internetMessageHeaders?: Array<{ name: string; value: string }>;
 };
+
+type GraphAttachment = {
+  '@odata.type'?: string;
+  id: string;
+  name?: string;
+  contentType?: string;
+  size?: number;
+  isInline?: boolean;
+};
+
+// Graph rejects request bodies above 4 MB; inline attachments must stay well
+// below that once base64-encoded. Larger files use upload sessions on a draft.
+const GRAPH_INLINE_ATTACHMENTS_MAX_BYTES = 2.5 * 1024 * 1024;
+const GRAPH_SMALL_ATTACHMENT_MAX_BYTES = 3 * 1024 * 1024;
+const GRAPH_UPLOAD_CHUNK_BYTES = 320 * 1024 * 12;
+
+const totalAttachmentBytes = (attachments?: OutgoingAttachment[]) =>
+  (attachments ?? []).reduce((sum, attachment) => sum + attachment.size, 0);
+
+const graphFileAttachment = (attachment: OutgoingAttachment) => ({
+  '@odata.type': '#microsoft.graph.fileAttachment',
+  name: attachment.filename,
+  contentType: attachment.contentType,
+  contentBytes: attachment.contentBase64,
+});
 
 type TokenResponse = { access_token: string; refresh_token?: string; expires_in?: number };
 
@@ -129,6 +157,7 @@ export class MicrosoftGraphProvider implements Provider {
       ...this.compact(accountId, message), provider: 'microsoft_graph', messageId: message.internetMessageId,
       cc: (message.ccRecipients ?? []).map(graphAddress), bcc: (message.bccRecipients ?? []).map(graphAddress),
       html, text,
+      ...(message.hasAttachments === false ? { attachments: [] } : {}),
       headers: Object.fromEntries((message.internetMessageHeaders ?? []).map(({ name, value }) => [name, value])),
     };
   }
@@ -171,9 +200,54 @@ export class MicrosoftGraphProvider implements Provider {
   }
 
   async getMessage(accountId: string, messageId: string) {
-    const select = 'id,conversationId,internetMessageId,receivedDateTime,sentDateTime,subject,bodyPreview,isRead,from,toRecipients,ccRecipients,bccRecipients,body,internetMessageHeaders';
+    const select = 'id,conversationId,internetMessageId,receivedDateTime,sentDateTime,subject,bodyPreview,isRead,hasAttachments,from,toRecipients,ccRecipients,bccRecipients,body,internetMessageHeaders';
     const message = await this.request<GraphMessage>(`/me/messages/${encodeURIComponent(messageId)}?$select=${select}`);
-    return this.full(accountId, message);
+    const full = this.full(accountId, message);
+    // Note: Graph's hasAttachments is false for messages with only inline images.
+    if (message.hasAttachments) {
+      full.attachments = await this.listAttachments(messageId);
+    }
+    return full;
+  }
+
+  private async listAttachments(messageId: string): Promise<AttachmentMetadata[]> {
+    const result = await this.request<{ value: GraphAttachment[] }>(
+      `/me/messages/${encodeURIComponent(messageId)}/attachments?$select=id,name,contentType,size,isInline`,
+    );
+    return result.value.map((attachment) => ({
+      id: attachment.id,
+      filename: attachment.name || 'attachment',
+      contentType: (attachment.contentType || 'application/octet-stream').toLowerCase(),
+      size: attachment.size ?? 0,
+      inline: attachment.isInline === true,
+    }));
+  }
+
+  async getAttachment(_accountId: string, messageId: string, attachmentId: string): Promise<ProviderAttachment> {
+    const base = `/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`;
+    let attachment: GraphAttachment;
+    try {
+      attachment = await this.request<GraphAttachment>(`${base}?$select=id,name,contentType,size,isInline`);
+    } catch (error) {
+      if (error instanceof ProviderHttpError && error.status === 404) throw attachmentNotFound(attachmentId);
+      throw error;
+    }
+    if (attachment['@odata.type'] && attachment['@odata.type'] !== '#microsoft.graph.fileAttachment') {
+      throw new ApiError(
+        ERROR_CODES.NOT_SUPPORTED,
+        'only file attachments can be downloaded from Microsoft 365 (item and reference attachments are not supported)',
+        422,
+      );
+    }
+    return {
+      id: attachment.id,
+      filename: attachment.name || 'attachment',
+      contentType: (attachment.contentType || 'application/octet-stream').toLowerCase(),
+      size: attachment.size,
+      load: async () => (await providerBinary(`https://graph.microsoft.com/v1.0${base}/$value`, {
+        headers: { Authorization: `Bearer ${await this.token()}`, Prefer: 'IdType="ImmutableId"' },
+      })).data,
+    };
   }
 
   async getThread(accountId: string, threadId: string) {
@@ -183,33 +257,128 @@ export class MicrosoftGraphProvider implements Provider {
     return result.value.map((message) => this.full(accountId, message));
   }
 
-  private messageBody(input: DraftInput) {
+  private messageBody(input: DraftInput, includeAttachments = true) {
     return {
       subject: input.subject,
       body: { contentType: input.html ? 'HTML' : 'Text', content: input.html || input.text },
       toRecipients: graphRecipients(input.to), ccRecipients: graphRecipients(input.cc), bccRecipients: graphRecipients(input.bcc),
+      ...(includeAttachments && input.attachments?.length
+        ? { attachments: input.attachments.map(graphFileAttachment) }
+        : {}),
     };
   }
 
+  private static fitsInline(attachments?: OutgoingAttachment[]) {
+    return totalAttachmentBytes(attachments) <= GRAPH_INLINE_ATTACHMENTS_MAX_BYTES;
+  }
+
+  /** Adds attachments to an existing draft, using upload sessions for large files. */
+  private async addDraftAttachments(draftId: string, attachments: OutgoingAttachment[]) {
+    const draftPath = `/me/messages/${encodeURIComponent(draftId)}/attachments`;
+    for (const attachment of attachments) {
+      if (attachment.size < GRAPH_SMALL_ATTACHMENT_MAX_BYTES) {
+        await this.request(draftPath, { method: 'POST', body: JSON.stringify(graphFileAttachment(attachment)) });
+        continue;
+      }
+      const session = await this.request<{ uploadUrl: string }>(`${draftPath}/createUploadSession`, {
+        method: 'POST',
+        body: JSON.stringify({
+          AttachmentItem: { attachmentType: 'file', name: attachment.filename, size: attachment.size, contentType: attachment.contentType },
+        }),
+      });
+      const data = Buffer.from(attachment.contentBase64, 'base64');
+      for (let start = 0; start < data.length; start += GRAPH_UPLOAD_CHUNK_BYTES) {
+        const chunk = data.subarray(start, Math.min(start + GRAPH_UPLOAD_CHUNK_BYTES, data.length));
+        // The pre-authenticated upload URL must not receive the bearer token.
+        const response = await globalThis.fetch(session.uploadUrl, {
+          method: 'PUT',
+          redirect: 'error',
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': String(chunk.length),
+            'Content-Range': `bytes ${start}-${start + chunk.length - 1}/${data.length}`,
+          },
+          body: chunk,
+          signal: globalThis.AbortSignal.timeout(60_000),
+        });
+        if (!response.ok) throw new ProviderHttpError(`attachment upload returned HTTP ${response.status}`, response.status);
+      }
+    }
+  }
+
+  private async deleteDraftQuietly(draftId: string) {
+    await this.request(`/me/messages/${encodeURIComponent(draftId)}`, { method: 'DELETE' }).catch(() => undefined);
+  }
+
+  /**
+   * Prepares a draft (attachments uploaded), then sends it. Failures before the
+   * final /send call are definite failures; the draft is removed best-effort.
+   */
+  private async sendViaDraft(createDraft: () => Promise<{ id: string; conversationId?: string }>, prepare: (draftId: string) => Promise<void>): Promise<ProviderSendResult> {
+    let draftId: string | undefined;
+    try {
+      const draft = await createDraft();
+      draftId = draft.id;
+      await prepare(draft.id);
+    } catch (error) {
+      if (draftId) await this.deleteDraftQuietly(draftId);
+      return { status: 'failed', detail: error instanceof Error ? error.message : String(error) };
+    }
+    await this.request(`/me/messages/${encodeURIComponent(draftId)}/send`, { method: 'POST' });
+    return { status: 'sent' };
+  }
+
   async createDraft(input: DraftInput) {
+    const inline = MicrosoftGraphProvider.fitsInline(input.attachments);
     const draft = await this.request<{ id: string; conversationId?: string }>('/me/messages', {
-      method: 'POST', body: JSON.stringify(this.messageBody(input)),
+      method: 'POST', body: JSON.stringify(this.messageBody(input, inline)),
     });
+    if (!inline && input.attachments?.length) await this.addDraftAttachments(draft.id, input.attachments);
     return { draftId: draft.id, threadId: draft.conversationId };
   }
 
   async sendMessage(input: SendInput): Promise<ProviderSendResult> {
-    await this.request('/me/sendMail', {
-      method: 'POST',
-      body: JSON.stringify({ message: { ...this.messageBody(input), internetMessageHeaders: [{ name: 'X-Slab-Email-Idempotency-Key', value: input.idempotencyKey }] }, saveToSentItems: true }),
-    });
-    return { status: 'sent' };
+    const headers = [{ name: 'X-Slab-Email-Idempotency-Key', value: input.idempotencyKey }];
+    if (MicrosoftGraphProvider.fitsInline(input.attachments)) {
+      await this.request('/me/sendMail', {
+        method: 'POST',
+        body: JSON.stringify({ message: { ...this.messageBody(input), internetMessageHeaders: headers }, saveToSentItems: true }),
+      });
+      return { status: 'sent' };
+    }
+    return this.sendViaDraft(
+      () => this.request<{ id: string }>('/me/messages', {
+        method: 'POST', body: JSON.stringify({ ...this.messageBody(input, false), internetMessageHeaders: headers }),
+      }),
+      (draftId) => this.addDraftAttachments(draftId, input.attachments ?? []),
+    );
   }
 
   async replyToMessage(input: ReplyInput): Promise<ProviderSendResult> {
-    await this.request(`/me/messages/${encodeURIComponent(input.messageId)}/${input.replyAll ? 'replyAll' : 'reply'}`, {
-      method: 'POST', body: JSON.stringify({ comment: input.text }),
-    });
-    return { status: 'sent' };
+    const action = input.replyAll ? 'replyAll' : 'reply';
+    const source = `/me/messages/${encodeURIComponent(input.messageId)}`;
+    // Graph accepts either `comment` (text, original quoted) or `message.body` (replaces the body), not both.
+    const body = input.html ? { body: { contentType: 'HTML', content: input.html } } : {};
+    const comment = input.html ? {} : { comment: input.text };
+    if (!input.attachments?.length && !input.html) {
+      await this.request(`${source}/${action}`, { method: 'POST', body: JSON.stringify({ comment: input.text }) });
+      return { status: 'sent' };
+    }
+    if (MicrosoftGraphProvider.fitsInline(input.attachments)) {
+      await this.request(`${source}/${action}`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ...comment,
+          message: { ...body, ...(input.attachments?.length ? { attachments: input.attachments.map(graphFileAttachment) } : {}) },
+        }),
+      });
+      return { status: 'sent' };
+    }
+    return this.sendViaDraft(
+      () => this.request<{ id: string }>(`${source}/${input.replyAll ? 'createReplyAll' : 'createReply'}`, {
+        method: 'POST', body: JSON.stringify({ ...comment, ...(input.html ? { message: body } : {}) }),
+      }),
+      (draftId) => this.addDraftAttachments(draftId, input.attachments ?? []),
+    );
   }
 }

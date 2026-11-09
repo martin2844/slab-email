@@ -122,10 +122,13 @@
 ## Anti-loop guard
 
 - `MAX_SENDS_PER_ACCOUNT_PER_HOUR` (default `60`) prevents excessive outbound sends per account/profile.
+- `MAX_NEW_SENDS_PER_ACCOUNT_PER_DAY` (default `50`, rolling 24h, overridable per account
+  with `dailySendLimit`) caps new outreach; replies only use the hourly limit.
+- `email_suppressions` holds opt-outs; `email_send` refuses suppressed to/cc/bcc
+  recipients before any provider call, `email_reply` only checks added cc recipients.
 
 ## Non-goals (MVP)
 
-- No attachment end-to-end operations
 - No mailbox replication or local index
 - No campaign/automation execution; consumers such as `slab-agents` own dispatch
 - No webmail UI

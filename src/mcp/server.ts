@@ -33,6 +33,13 @@ const DRAFT_TOOL: ToolAnnotations = {
   openWorldHint: true
 };
 
+const SUPPRESS_TOOL: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false
+};
+
 const DELIVERY_TOOL: ToolAnnotations = {
   readOnlyHint: false,
   destructiveHint: false,
@@ -68,7 +75,8 @@ const messageContent = (message: Awaited<ReturnType<MailService['getMessage']>>)
       date: message.date,
       unread: message.unread,
       body: message.text || message.html || message.snippet,
-      bodyFormat: message.text ? 'text' : message.html ? 'html' : 'snippet'
+      bodyFormat: message.text ? 'text' : message.html ? 'html' : 'snippet',
+      attachments: message.attachments ?? []
     })
   );
 
@@ -78,7 +86,10 @@ const toolError = (error: unknown) => {
     error instanceof ApiError &&
     (error.code === ERROR_CODES.SENDER_IDENTITY_MISMATCH ||
       error.code === ERROR_CODES.REPLY_PLAN_MISMATCH ||
-      error.code === ERROR_CODES.SEND_OUTCOME_UNKNOWN)
+      error.code === ERROR_CODES.SEND_OUTCOME_UNKNOWN ||
+      error.code === ERROR_CODES.RECIPIENT_SUPPRESSED ||
+      error.code === ERROR_CODES.DAILY_SEND_LIMIT_REACHED ||
+      error.code === ERROR_CODES.ATTACHMENT_TOO_LARGE)
       ? error.details
       : undefined;
   const detail = safeDetails ? JSON.stringify(safeDetails) : undefined;
@@ -170,6 +181,38 @@ const listThreadInputSchema = z.object({
   threadId: z.string().trim().min(1)
 });
 
+const getAttachmentInputSchema = z.object({
+  accountId: z.string().trim().min(1),
+  messageId: z.string().trim().min(1),
+  attachmentId: z.string().trim().min(1).describe('Attachment id from email_get_message attachments[].id')
+});
+
+const suppressInputSchema = z.object({
+  address: z.string().trim().email().describe('Email address that asked not to be contacted'),
+  reason: z.string().trim().min(1).max(1000).describe(
+    'Why, ideally quoting the request (e.g. "replied: unsubscribe", "no me escriban")'
+  ),
+  scope: z.enum(['address', 'domain']).optional().describe(
+    'address (default) suppresses only this mailbox; domain suppresses every address at its domain'
+  )
+});
+
+const htmlField = z.string().max(500_000).optional().describe(
+  'Optional HTML version of the body. text stays required and is sent as the plain-text alternative.'
+);
+
+const attachmentsField = z
+  .array(
+    z.object({
+      filename: z.string().min(1).max(255).describe('File name without path separators, e.g. quote.pdf'),
+      contentType: z.string().trim().min(1).max(255).describe('MIME type, e.g. application/pdf'),
+      contentBase64: z.string().min(1).describe('File content, standard base64')
+    })
+  )
+  .max(100)
+  .optional()
+  .describe('Optional attachments (default limits: max 10 files, 10 MB decoded total)');
+
 const draftInputSchema = z.object({
   accountId: z.string().trim().min(1),
   to: z.array(z.string().trim().email()).min(1),
@@ -177,7 +220,8 @@ const draftInputSchema = z.object({
   bcc: z.array(z.string().trim().email()).optional(),
   subject: z.string().trim().min(1),
   text: z.string().trim().min(1),
-  html: z.string().optional()
+  html: htmlField,
+  attachments: attachmentsField
 });
 
 const agenticMessageSchema = z.object({
@@ -186,7 +230,9 @@ const agenticMessageSchema = z.object({
   cc: z.array(z.string().trim().email()).optional(),
   bcc: z.array(z.string().trim().email()).optional(),
   subject: z.string().trim().min(1).max(998),
-  text: z.string().trim().min(1).max(100_000)
+  text: z.string().trim().min(1).max(100_000),
+  html: htmlField,
+  attachments: attachmentsField
 });
 
 const sendInputSchema = agenticMessageSchema.extend({
@@ -209,6 +255,8 @@ const replyInputSchema = z.object({
     'Exact reply subject shown for approval, including the Re: prefix when needed.'
   ),
   text: z.string().trim().min(1).max(100_000),
+  html: htmlField,
+  attachments: attachmentsField,
   idempotencyKey: z.string().trim().min(1)
 });
 
@@ -294,7 +342,7 @@ export const createMcpTools = (
     server.registerTool(
       'email_get_message',
       {
-        description: 'Get a complete message, including its body, by account and message id',
+        description: 'Get a complete message, including its body and attachment metadata (id, filename, contentType, size), by account and message id',
         inputSchema: getMessageInputSchema,
         annotations: MAIL_READ_TOOL
       },
@@ -305,6 +353,67 @@ export const createMcpTools = (
           return {
             structuredContent: asStructuredContent(message),
             content: messageContent(message)
+          };
+        } catch (error) {
+          return toolError(error);
+        }
+      }
+    );
+
+  if (profile.readEnabled)
+    server.registerTool(
+      'email_get_attachment',
+      {
+        description:
+          'Download one attachment of a message. Text-like files (text/*, JSON, CSV, XML) are returned as text (truncated to the configured limit); other files as base64 when under the size limit.',
+        inputSchema: getAttachmentInputSchema,
+        annotations: MAIL_READ_TOOL
+      },
+      async (rawArgs, _extra) => {
+        const args = getAttachmentInputSchema.parse(rawArgs);
+        try {
+          const result = await mailService.getAttachment(req, args.accountId, args.messageId, args.attachmentId);
+          return {
+            structuredContent: asStructuredContent(result),
+            content: textContent(
+              result.encoding === 'text'
+                ? `attachment ${result.filename} (${result.contentType}, ${result.size} bytes${result.truncated ? ', truncated' : ''}):\n${result.content}`
+                : JSON.stringify(result)
+            )
+          };
+        } catch (error) {
+          return toolError(error);
+        }
+      }
+    );
+
+  if (profile.readEnabled || profile.draftEnabled || profile.sendEnabled)
+    server.registerTool(
+      'email_suppress',
+      {
+        description:
+          'Record an opt-out: the address (or its whole domain) will never receive new emails from any account. Use whenever someone asks not to be contacted ("unsubscribe", "stop", "no me escriban"). Replies to their own messages stay possible.',
+        inputSchema: suppressInputSchema,
+        annotations: SUPPRESS_TOOL
+      },
+      async (rawArgs, _extra) => {
+        const args = suppressInputSchema.parse(rawArgs);
+        try {
+          const result = mailService.suppress(req, args);
+          return {
+            structuredContent: asStructuredContent({
+              suppressed: true,
+              created: result.created,
+              entry: {
+                id: result.entry.id,
+                kind: result.entry.kind,
+                value: result.entry.value,
+                createdAt: result.entry.createdAt
+              }
+            }),
+            content: textContent(
+              `${result.created ? 'suppressed' : 'already suppressed'}: ${result.entry.kind} ${result.entry.value}`
+            )
           };
         } catch (error) {
           return toolError(error);
@@ -352,7 +461,8 @@ export const createMcpTools = (
             bcc: ensureArray(args.bcc)?.map((entry) => ({ address: entry })),
             subject: args.subject,
             text: args.text,
-            html: args.html
+            html: args.html,
+            attachments: args.attachments
           });
           return {
             structuredContent: asStructuredContent(result),
@@ -368,7 +478,7 @@ export const createMcpTools = (
     server.registerTool(
       'email_send',
       {
-        description: 'Send email from the verified account identity. Pass expectedFrom from the latest email_list_accounts result and an idempotencyKey.',
+        description: 'Send a NEW email from the verified account identity. Pass expectedFrom from the latest email_list_accounts result and an idempotencyKey. Refused when any recipient is on the opt-out (suppression) list or the account reached its daily limit of new emails.',
         inputSchema: sendInputSchema,
         annotations: DELIVERY_TOOL
       },
@@ -386,6 +496,8 @@ export const createMcpTools = (
             bcc: ensureArray(args.bcc)?.map((entry) => ({ address: entry })),
             subject: args.subject,
             text: args.text,
+            html: args.html,
+            attachments: args.attachments,
             idempotencyKey: args.idempotencyKey
           });
           return {
@@ -424,6 +536,8 @@ export const createMcpTools = (
             messageId: args.messageId,
             to: ensureArray(args.to)?.map((entry) => ({ address: entry })),
             text: args.text,
+            html: args.html,
+            attachments: args.attachments,
             idempotencyKey: args.idempotencyKey
           });
           return {

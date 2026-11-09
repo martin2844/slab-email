@@ -51,7 +51,28 @@ Returns compact list payload (`items` + optional `nextCursor`) without full body
 
 Inputs: `accountId`, `messageId`.
 
-Returns full message fields for the selected message.
+Returns full message fields for the selected message, including
+`attachments: [{ id, filename, contentType, size, inline? }]`.
+
+### `email_get_attachment`
+
+Inputs: `accountId`, `messageId`, `attachmentId` (from `email_get_message`).
+
+Returns `{ id, filename, contentType, size, encoding: "text" | "base64", content, truncated }`.
+Text-like files are truncated to `MAX_ATTACHMENT_TEXT_BYTES` (default 200 KB);
+binary files are returned as base64 up to `MAX_ATTACHMENT_BASE64_BYTES` (default
+5 MB), otherwise `ATTACHMENT_TOO_LARGE`. Providers without download support
+return `NOT_SUPPORTED`. Requires read permission.
+
+### `email_suppress`
+
+Inputs: `address` (email), `reason` (1–1000 chars), optional `scope`
+(`address` default, or `domain` to suppress the address's whole domain).
+
+Records an opt-out shared by every account: `email_send` then refuses that
+recipient (`RECIPIENT_SUPPRESSED`). Idempotent; returns
+`{ suppressed: true, created, entry: { id, kind, value, createdAt } }`.
+Available to any profile with read, draft or send permission.
 
 ### `email_list_threads`
 
@@ -70,6 +91,7 @@ Inputs:
 - `subject`
 - `text`
 - `html?`
+- `attachments?[]`: `{ filename, contentType, contentBase64 }`
 
 Creates a provider draft where supported (Gmail supported, generic IMAP/SMTP returns unsupported).
 
@@ -82,11 +104,15 @@ Inputs:
 - `cc?[]`
 - `bcc?[]`
 - `subject`
-- `text`
+- `text` (plain-text body, required)
+- `html?` (HTML alternative; sent as multipart/alternative)
+- `attachments?[]`: `{ filename, contentType, contentBase64 }` (default max 10 files, 10 MB decoded)
 - `idempotencyKey` (required)
 - `expectedFrom` (required; exact sender from `email_list_accounts`)
 
-Idempotency is enforced by `(accountId, idempotencyKey)`.
+Idempotency is enforced by `(accountId, idempotencyKey)`. New sends are refused
+when any recipient is suppressed (`RECIPIENT_SUPPRESSED`) or the account reached
+its rolling 24h cap (`DAILY_SEND_LIMIT_REACHED`, with `details.retryAt`).
 
 ### `email_reply`
 
@@ -98,7 +124,12 @@ Inputs:
 - `to[]` (required; exactly the original sender from `email_get_message`)
 - `expectedSubject` (required; exact approved reply subject)
 - `text`
+- `html?`
+- `attachments?[]`
 - `idempotencyKey` (required)
+
+Replies only count toward the hourly limit, not the daily cap, and may answer
+suppressed senders.
 
 ## MCP example
 
